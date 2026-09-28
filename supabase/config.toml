@@ -1,0 +1,7 @@
+project_id = "auction-scout"
+
+[functions.discord-interactions]
+verify_jwt = false
+
+[functions.scout-worker]
+verify_jwt = false

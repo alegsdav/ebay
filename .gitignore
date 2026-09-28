@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+data/
+*.sqlite*
+*.db*
+coverage/
+.DS_Store
+
+!.env.supabase.example
+supabase/.temp/
+supabase/.branches/
+supabase/functions/*/index.ts
+
+node_modules.evicted/

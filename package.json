@@ -1,0 +1,40 @@
+{
+  "name": "auction-scout",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only, multi-category eBay deal research for Discord",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "dev": "tsx --env-file-if-exists=.env src/main.ts start",
+    "build": "tsc -p tsconfig.json",
+    "start": "node --env-file-if-exists=.env dist/src/main.js start",
+    "register": "tsx --env-file-if-exists=.env src/main.ts register",
+    "scan": "tsx --env-file-if-exists=.env src/main.ts scan",
+    "demo": "tsx src/demo.ts",
+    "import:comparables": "tsx --env-file-if-exists=.env src/main.ts import",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "check": "npm run typecheck && npm test && npm run build && npm run build:cloud",
+    "format": "prettier --write src tests scripts docs README.md package.json tsconfig.json .github/workflows/ci.yml",
+    "format:check": "prettier --check src tests scripts docs README.md package.json tsconfig.json .github/workflows/ci.yml",
+    "build:cloud": "node scripts/build-cloud.mjs",
+    "import:cloud": "node --import tsx --env-file-if-exists=.env scripts/cloud-admin.ts import",
+    "check:model": "node --import tsx --env-file-if-exists=.env scripts/cloud-admin.ts model"
+  },
+  "dependencies": {
+    "discord.js": "^14.21.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.28.2",
+    "prettier": "^3.9.7",
+    "supabase": "^2.117.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}
