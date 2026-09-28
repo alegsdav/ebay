@@ -15,11 +15,8 @@ import { basicReject } from "../filters/matches.js";
 import { evaluateMatch, minExtractionConfidence } from "../filters/evaluate.js";
 import { HttpError } from "../connectors/http.js";
 import { log, errorKind } from "../logging.js";
-import {
-  scheduledSources,
-  type ListingSourceConnector,
-  type SourceId,
-} from "../connectors/source.js";
+import { scheduledSources } from "../connectors/source.js";
+import { marketplaceCity } from "../config/preferences.js";
 const json = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), {
     status,
@@ -193,6 +190,7 @@ export async function processJob(
         llm().parseWatch(...args),
       normalize: (...args: Parameters<LlmClient["normalize"]>) =>
         llm().normalize(...args),
+      resolveCity: (zip: string) => llm().resolveCity(zip),
     };
     const commands = new CloudCommands(db, discord, interpreter, c);
     try {
@@ -218,69 +216,18 @@ export async function processJob(
   }
   if (!c.CLOUD_MONITORING_ENABLED) return;
   const w = await db.watch(job.payload.watchId);
-  if (!w || !w.active || w.revision !== job.payload.revision) return;
-  const connectors = sourceConnectors(w.config, c, db, signal);
-  if (job.kind === "scan") {
-    const candidates = new Map<string, Listing>();
-    const failures: unknown[] = [];
-    // Each source is scanned independently: one failing or disabled leg never
-    // blocks the others, and a retry re-runs only when every leg failed.
-    for (const [source, connector] of connectors) {
-      let found = 0;
-      try {
-        for await (const l of connector.search(w.config)) {
-          if (!basicReject(l, w.config) && !candidates.has(l.id)) {
-            candidates.set(l.id, l);
-            found++;
-          }
-          if (found >= c.CLOUD_ITEMS_PER_WATCH) break;
-        }
-      } catch (error) {
-        failures.push(error);
-        if (error instanceof HttpError && error.status === 429)
-          await db.cooldown(error.service, error.retryAt).catch(() => {});
-        log("cloud_source_failure", {
-          watchId: w.id,
-          source,
-          error: errorKind(error),
-        });
-      }
-    }
-    if (connectors.size && failures.length === connectors.size)
-      throw failures[0];
-    const old = await db.rows("scout_processing", {
-      watch_id: `eq.${w.id}`,
-      status: "eq.needs_processing",
-      order: "updated_at.asc",
-      limit: "10",
-      select: "listing_id,scout_listings(data)",
-    });
-    for (const row of old) {
-      const l = Listing.parse(row.scout_listings.data);
-      if (
-        connectors.has(l.source) &&
-        (!l.endTime || Date.parse(l.endTime) > Date.now())
-      )
-        candidates.set(l.id, l);
-    }
-    await db.enqueue(
-      [...candidates.values()].map((l) => ({
-        dedupe_key: `listing:${job.id}:${l.id}`,
-        kind: "listing",
-        payload: { watchId: w.id, revision: w.revision, listing: l },
-      })),
-    );
-    log("cloud_scan_enqueued", {
-      watchId: w.id,
-      sources: [...connectors.keys()],
-      candidates: candidates.size,
-      cap: c.CLOUD_ITEMS_PER_WATCH,
-    });
+  // Snapshot records are already paid for, so collect them for any active revision.
+  if (
+    !w ||
+    !w.active ||
+    (job.kind !== "snapshot" && w.revision !== job.payload.revision)
+  )
     return;
-  }
+  const sources = sourceConnectors(w.config, c, db, signal);
+  if (job.kind === "scan") return scan(job, w, sources, c, db);
+  if (job.kind === "snapshot") return collectSnapshot(job, w, sources, c, db);
   let listing = Listing.parse(job.payload.listing);
-  const source = connectors.get(listing.source);
-  if (!source) {
+  if (!sources[listing.source === "ebay" ? "ebay" : "facebook"]) {
     log("cloud_listing_skipped", {
       watchId: w.id,
       source: listing.source,
@@ -290,9 +237,11 @@ export async function processJob(
   }
   await db.saveListing(listing);
   try {
-    // All queued candidates are refreshed; never alert using the queued snapshot.
-    if (source.detail) listing = await source.detail(listing);
-    await db.saveListing(listing);
+    // eBay candidates are refreshed; Marketplace records arrive fresh from their snapshot.
+    if (listing.source === "ebay") {
+      listing = await sources.ebay!.detail(listing);
+      await db.saveListing(listing);
+    }
     const reject = basicReject(listing, w.config);
     if (reject) {
       await db.process(w.id, listing.id, "filtered", { reason: reject });
@@ -387,7 +336,237 @@ export async function processJob(
     throw error;
   }
 }
-// Connectors for the sources this watch scans now; disabled legs are logged and skipped.
+type Sources = ReturnType<typeof sourceConnectors>;
+type ActiveWatch = NonNullable<Awaited<ReturnType<CloudStore["watch"]>>>;
+const recordBudget = "brightdata_records";
+// Each source is scanned independently: one failing or disabled leg never
+// blocks the others, and a retry re-runs only when every leg failed.
+async function scan(
+  job: Job,
+  w: ActiveWatch,
+  sources: Sources,
+  c: CloudConfig,
+  db: CloudStore,
+) {
+  const candidates = new Map<string, Listing>();
+  const failures: unknown[] = [];
+  const legs = [
+    sources.ebay &&
+      (async () => {
+        let found = 0;
+        for await (const l of sources.ebay!.search(w.config)) {
+          if (!basicReject(l, w.config) && !candidates.has(l.id)) {
+            candidates.set(l.id, l);
+            found++;
+          }
+          if (found >= c.CLOUD_ITEMS_PER_WATCH) break;
+        }
+      }),
+    sources.facebook && (() => startSnapshot(w, sources.facebook!, c, db)),
+  ].filter((leg) => !!leg);
+  for (const leg of legs)
+    try {
+      await leg();
+    } catch (error) {
+      failures.push(error);
+      if (error instanceof HttpError && error.status === 429)
+        await db.cooldown(error.service, error.retryAt).catch(() => {});
+      log("cloud_source_failure", { watchId: w.id, error: errorKind(error) });
+    }
+  if (legs.length && failures.length === legs.length) throw failures[0];
+  const old = await db.rows("scout_processing", {
+    watch_id: `eq.${w.id}`,
+    status: "eq.needs_processing",
+    order: "updated_at.asc",
+    limit: "10",
+    select: "listing_id,scout_listings(data)",
+  });
+  for (const row of old) {
+    const l = Listing.parse(row.scout_listings.data);
+    if (
+      sources[l.source === "ebay" ? "ebay" : "facebook"] &&
+      (!l.endTime || Date.parse(l.endTime) > Date.now())
+    )
+      candidates.set(l.id, l);
+  }
+  await db.enqueue(
+    listingJobs(`listing:${job.id}`, w, [...candidates.values()]),
+  );
+  log("cloud_scan_enqueued", {
+    watchId: w.id,
+    candidates: candidates.size,
+    cap: c.CLOUD_ITEMS_PER_WATCH,
+  });
+}
+function listingJobs(prefix: string, w: ActiveWatch, listings: Listing[]) {
+  // Stagger availability so newer listings are processed (and alerted) first.
+  const now = Date.now();
+  return listings.map((l, i) => ({
+    dedupe_key: `${prefix}:${l.id}`,
+    kind: "listing" as const,
+    payload: { watchId: w.id, revision: w.revision, listing: l },
+    available_at: new Date(now + i * 1000).toISOString(),
+  }));
+}
+// The first search for a watch's keywords and city returns current listings
+// (older ones included); later hourly polls ask only for a few recent ones.
+async function startSnapshot(
+  w: ActiveWatch,
+  facebook: BrightDataSource,
+  c: CloudConfig,
+  db: CloudStore,
+) {
+  const queryKey = await digest({
+    searchTerms: w.config.searchTerms,
+    city: w.config.location && marketplaceCity(w.config.location),
+    radius: w.config.location?.radiusMiles,
+  });
+  const initial = !(
+    await db.rows("scout_ingestion_runs", {
+      watch_id: `eq.${w.id}`,
+      query_key: `eq.${queryKey}`,
+      status: "in.(running,succeeded)",
+      select: "id",
+      limit: "1",
+    })
+  ).length;
+  const limit = initial
+    ? c.env.BRIGHT_DATA_INITIAL_RECORDS
+    : c.env.BRIGHT_DATA_POLL_RECORDS;
+  const cap = c.env.BRIGHT_DATA_MAX_RECORDS_PER_MONTH;
+  if (!(await db.monthlyBudget(recordBudget, limit, cap))) {
+    log("brightdata_budget_exhausted", { watchId: w.id, limit, cap });
+    return;
+  }
+  let snapshotId: string;
+  try {
+    snapshotId = await facebook.trigger(w.config, {
+      limit,
+      recentOnly: !initial,
+    });
+  } catch (error) {
+    await db.monthlyBudget(recordBudget, -limit, cap).catch(() => {});
+    throw error;
+  }
+  const [run] = await db.insert("scout_ingestion_runs", {
+    watch_id: w.id,
+    provider_request_id: snapshotId,
+    query_key: queryKey,
+    status: "running",
+    pages_requested: 1,
+    cost_units: limit,
+  });
+  await db.enqueue([
+    snapshotJob(w, {
+      snapshotId,
+      runId: run?.id ?? null,
+      reserved: limit,
+      polls: 0,
+    }),
+  ]);
+  log("brightdata_triggered", { watchId: w.id, limit, initial });
+}
+function snapshotJob(
+  w: ActiveWatch,
+  p: {
+    snapshotId: string;
+    runId: string | null;
+    reserved: number;
+    polls: number;
+  },
+) {
+  return {
+    dedupe_key: `snapshot:${p.snapshotId}:${p.polls}`,
+    kind: "snapshot" as const,
+    payload: { watchId: w.id, revision: w.revision, ...p },
+    available_at: new Date(Date.now() + 60000).toISOString(),
+  };
+}
+async function collectSnapshot(
+  job: Job,
+  w: ActiveWatch,
+  sources: Sources,
+  c: CloudConfig,
+  db: CloudStore,
+) {
+  const p = job.payload as {
+    snapshotId: string;
+    runId: string | null;
+    reserved: number;
+    polls: number;
+  };
+  const cap = c.env.BRIGHT_DATA_MAX_RECORDS_PER_MONTH;
+  const finish = (fields: Record<string, unknown>) =>
+    p.runId
+      ? db.update(
+          "scout_ingestion_runs",
+          { id: `eq.${p.runId}` },
+          { finished_at: new Date().toISOString(), ...fields },
+        )
+      : Promise.resolve();
+  if (!sources.facebook) {
+    log("cloud_snapshot_skipped", { watchId: w.id, reason: "source_disabled" });
+    return;
+  }
+  const status = await sources.facebook.progress(p.snapshotId);
+  if (status === "starting" || status === "running") {
+    if (p.polls >= 20) {
+      await finish({ status: "failed", error_kind: "snapshot_timeout" });
+      log("brightdata_snapshot_timeout", { watchId: w.id });
+      return;
+    }
+    await db.enqueue([snapshotJob(w, { ...p, polls: p.polls + 1 })]);
+    return;
+  }
+  if (status !== "ready") {
+    await db.monthlyBudget(recordBudget, -p.reserved, cap).catch(() => {});
+    await finish({ status: "failed", error_kind: `snapshot_${status}` });
+    log("brightdata_snapshot_failed", { watchId: w.id, status });
+    return;
+  }
+  const result = await sources.facebook.download(p.snapshotId);
+  const unused = p.reserved - result.received;
+  if (unused > 0) await db.monthlyBudget(recordBudget, -unused, cap);
+  // Already-seen listings are billed again by Bright Data, but never re-processed.
+  const seen = await db.seen(
+    w.id,
+    result.listings.map((l) => l.id),
+  );
+  const fresh = result.listings
+    .filter((l) => !seen.has(l.id))
+    .sort(
+      (a, b) =>
+        (b.listedAt ? Date.parse(b.listedAt) : 0) -
+        (a.listedAt ? Date.parse(a.listedAt) : 0),
+    );
+  const accepted: Listing[] = [];
+  for (const l of fresh) {
+    const reason = basicReject(l, w.config);
+    if (!reason) {
+      accepted.push(l);
+      continue;
+    }
+    await db.saveListing(l);
+    await db.process(w.id, l.id, "filtered", { reason });
+  }
+  await db.enqueue(listingJobs(`listing:${p.snapshotId}`, w, accepted));
+  await finish({
+    status: "succeeded",
+    records_received: result.received,
+    records_accepted: accepted.length,
+    cost_units: result.received,
+  });
+  log("brightdata_collected", {
+    watchId: w.id,
+    received: result.received,
+    errors: result.errors,
+    rejected: result.rejected,
+    repeats: result.listings.length - fresh.length,
+    queued: accepted.length,
+  });
+}
+// Connectors for the sources this watch scans now; disabled or unconfigured legs
+// are logged and skipped.
 function sourceConnectors(
   w: WatchConfig,
   c: CloudConfig,
@@ -395,26 +574,30 @@ function sourceConnectors(
   signal: AbortSignal,
 ) {
   const plan = scheduledSources(w, {
-    facebook: c.env.FACEBOOK_MONITORING_ENABLED,
+    ebay: !!(
+      c.env.EBAY_CLIENT_ID &&
+      c.env.EBAY_CLIENT_SECRET &&
+      c.env.EBAY_POSTAL_CODE
+    ),
+    facebook: c.env.FACEBOOK_MONITORING_ENABLED && !!c.env.BRIGHT_DATA_API_KEY,
   });
   for (const skip of plan.skipped) log("cloud_source_skipped", skip);
-  const connectors = new Map<SourceId, ListingSourceConnector>();
-  for (const source of plan.scan)
-    connectors.set(
-      source,
-      source === "ebay"
-        ? new EbaySource(
-            { ...c.env, MAX_PAGES_PER_WATCH: 1 },
-            () => db.budget("ebay", c.env.EBAY_MAX_CALLS_PER_DAY),
-            signal,
-          )
-        : new BrightDataSource(
-            c.env,
-            () => db.budget("brightdata", c.env.BRIGHT_DATA_MAX_CALLS_PER_DAY),
-            signal,
-          ),
-    );
-  return connectors;
+  return {
+    ebay: plan.scan.includes("ebay")
+      ? new EbaySource(
+          { ...c.env, MAX_PAGES_PER_WATCH: 1 },
+          () => db.budget("ebay", c.env.EBAY_MAX_CALLS_PER_DAY),
+          signal,
+        )
+      : undefined,
+    facebook: plan.scan.includes("facebook_marketplace")
+      ? new BrightDataSource(
+          c.env,
+          () => db.budget("brightdata", c.env.BRIGHT_DATA_MAX_CALLS_PER_DAY),
+          signal,
+        )
+      : undefined,
+  };
 }
 export function workerHandler(c: CloudConfig) {
   return async (req: Request): Promise<Response> => {

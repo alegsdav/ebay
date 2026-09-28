@@ -1,7 +1,7 @@
 import { HttpError } from "../connectors/http.js";
 import type { Listing, Normalized, WatchConfig } from "../config/schema.js";
 import type { MatchResult } from "../filters/evaluate.js";
-import { sourceLabel } from "../config/preferences.js";
+import { sourceLabel, marketplaceCity } from "../config/preferences.js";
 export interface Interaction {
   id: string;
   application_id: string;
@@ -197,11 +197,12 @@ export function preview(
           : []),
         ...(marketplace
           ? [
-              `Marketplace area: ${clean(config.location?.label ?? "unset")} · ${config.location?.radiusMiles} miles · ${config.deliveryModes?.join(" / ")}`,
+              `Marketplace: near ${clean((config.location && marketplaceCity(config.location)) ?? "unset")} · ${config.location?.radiusMiles} miles · ${config.deliveryModes?.join(" / ")}`,
+              "Marketplace: first check shows current listings; later checks look for newly listed ones.",
               ...(facebookEnabled
                 ? []
                 : [
-                    "Facebook Marketplace discovery is not connected yet; that leg is skipped until it is.",
+                    "Facebook Marketplace searching is turned off right now; that leg is skipped until it is enabled.",
                   ]),
             ]
           : []),
@@ -313,6 +314,15 @@ export function alertMessage(p: CloudAlert, id: string): Message {
                   value: `${clean(l.sellerName).slice(0, 100)} · ${l.sellerPercent ?? "unknown"}% positive · ${l.sellerFeedback ?? "unknown"} feedback`,
                 },
               ]),
+          ...(l.listedAt
+            ? [
+                {
+                  name: "Listed",
+                  value: `<t:${Math.floor(Date.parse(l.listedAt) / 1000)}:R>`,
+                  inline: true,
+                },
+              ]
+            : []),
           ...(l.auction
             ? [
                 {

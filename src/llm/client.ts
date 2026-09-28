@@ -9,7 +9,7 @@ import {
 import { requestJson } from "../connectors/http.js";
 import { errorKind, log } from "../logging.js";
 import type { UserDefaults } from "../config/preferences.js";
-export const PROMPT_VERSION = "2026-09-v4-keyword-watch";
+export const PROMPT_VERSION = "2026-09-v5-marketplace-city";
 export interface Interpreter {
   model: string;
   parseWatch(
@@ -17,7 +17,12 @@ export interface Interpreter {
     defaults?: UserDefaults | null,
   ): Promise<ParsedWatch>;
   normalize(listing: Listing, watch: WatchConfig): Promise<Normalized>;
+  // Optional so command tests can omit it; the cloud interpreter always provides it.
+  resolveCity?(zip: string): Promise<string | null>;
 }
+const CityLookup = z
+  .object({ city: z.string().trim().min(3).max(80).nullable() })
+  .strict();
 export class LlmClient implements Interpreter {
   model: string;
   constructor(
@@ -130,10 +135,20 @@ export class LlmClient implements Interpreter {
     return this.structured(
       ParsedWatch,
       "watch",
-      `Parse a US/USD keyword watch request. The watch searches eBay and Facebook Marketplace and notifies when a new listing matches; there is no category list, resale or profit analysis. Extract sources only when the user explicitly limits the search to eBay or to Facebook Marketplace (local/pickup wording alone is not a limit); otherwise return null sources. Extract city/postal area, radius in miles, delivery modes, minimum and maximum listing price and estimated travel cost. Return null for unspecified source/location/delivery/price/cost fields. Never extract a street address or coordinates; ask for a city/postal area in clarifications. Location and radius may come from savedDefaults: if the query overrides just city or radius, combine that explicit value with the other saved field. Never invent a city or radius.
+      `Parse a US/USD keyword watch request. The watch searches eBay and Facebook Marketplace and notifies when a new listing matches; there is no category list, resale or profit analysis. Extract sources only when the user explicitly limits the search to eBay or to Facebook Marketplace (local/pickup wording alone is not a limit); otherwise return null sources. Extract city/postal area, radius in miles, delivery modes, minimum and maximum listing price and estimated travel cost. Return null for unspecified source/location/delivery/price/cost fields. Never extract a street address or coordinates; ask for a city/postal area in clarifications. Facebook Marketplace searches by city: set location.city to "City, ST" (two-letter state) for the stated place, including the city a stated US ZIP code belongs to; null if unknown. Location and radius may come from savedDefaults: if the query overrides just city or radius, combine that explicit value with the other saved field. Never invent a city or radius.
 Keep search terms broad enough for marketplace keyword search. Put explicit measurable or categorical item criteria in constraints, using short lowercase snake_case attribute keys that describe the item (for example brand, model, size, storage_gb, weight_grams, connectivity). For vague measurable preferences, propose a concrete threshold in recommendations with the original phrase, a short reason, and a constraint. For example lightweight gaming mouse can be proposed as weight_grams lte 50 (50 grams or less); this is a suggested user preference, NOT an assertion about a product. Never put an unconfirmed recommendation into constraints. Do not duplicate a key across constraints and recommendations. Explicit values override vague wording; "Specific criteria" supplied by the user are explicit values. Return recommendations [] when none are needed. Missing location/delivery can be supplied by saved defaults; leave null without asking clarifications for those omissions. Use clarifications only for ambiguity that cannot be resolved with a proposed measurable preference. Do not infer unstated attributes. Omit unstated constraints. Put words the user wants to avoid in excludedKeywords. Return null for unspecified seller thresholds. Default conditions new/open_box/used, buying fixed. Clearly list defaults in assumptions. Supported location is US only: if the user requests another market, explain in clarifications. Numeric constraint values contain only numbers; categorical values lowercase. An unspecified exact model remains unspecified. Do not invent listing facts.`,
       { query, savedDefaults: defaults ?? null },
     );
+  }
+  async resolveCity(zip: string) {
+    if (!/^\d{5}$/.test(zip)) return null;
+    const { city } = await this.structured(
+      CityLookup,
+      "city",
+      `Return the primary US city for this ZIP code as "City, ST" with the two-letter state abbreviation, for a Facebook Marketplace location search. Return null if the ZIP code is unknown or not a US ZIP.`,
+      { zip },
+    );
+    return city && /^[^,]{2,60}, [A-Z]{2}$/.test(city) ? city : null;
   }
   normalize(listing: Listing, watch: WatchConfig) {
     return this.structured(

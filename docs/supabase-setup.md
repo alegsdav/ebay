@@ -126,7 +126,7 @@ Four pulses per minute are approximately **172,800 function invocations per 30 d
 4. Create and confirm a narrow watch. Inspect worker logs, `scout_jobs` and `scout_processing` after the next Cron pulse.
 5. When results look right, set `DRY_RUN=false` and upload secrets again.
 
-Watches that include Facebook Marketplace (the default) are limited to 10 active across the deployment and run at most daily, to fit the Bright Data free-tier budget. eBay-only watches can run hourly. While `FACEBOOK_MONITORING_ENABLED=false`, the Marketplace leg is skipped and logged as `cloud_source_skipped`.
+Watches that include Facebook Marketplace (the default) are limited to 5 active across the deployment and run at most hourly. Each Marketplace poll triggers a Bright Data snapshot that a later `snapshot` job collects. `BRIGHT_DATA_MAX_RECORDS_PER_MONTH` caps billed records per UTC month. While `FACEBOOK_MONITORING_ENABLED=false` or `BRIGHT_DATA_API_KEY` is unset, the Marketplace leg is skipped and logged as `cloud_source_skipped`; the eBay leg is skipped the same way until eBay credentials are set.
 
 ## Health, storage and recovery
 

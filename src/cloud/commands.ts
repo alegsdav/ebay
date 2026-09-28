@@ -129,7 +129,7 @@ export class CloudCommands {
               : "Monitoring is OFF until you enable CLOUD_MONITORING_ENABLED.",
             ...(facebookPending
               ? [
-                  "Facebook Marketplace discovery is not connected yet; that leg is skipped until it is.",
+                  "Facebook Marketplace searching is turned off right now; that leg is skipped until it is enabled.",
                 ]
               : []),
             ...(this.config.env.DRY_RUN
@@ -176,6 +176,11 @@ export class CloudCommands {
       if (!Object.keys(opts).length)
         return { content: describeDefaults(previous) };
       const value = updateDefaults(previous, opts);
+      // Marketplace searches by city; look up the city for a ZIP once, at save time.
+      if (value.location.postalCode && !value.location.city)
+        value.location.city = await this.llm
+          .resolveCity?.(value.location.postalCode)
+          .catch(() => null);
       await this.db.saveDefaults(user, guild, value);
       return { content: `Saved. ${describeDefaults(value)}` };
     }
@@ -259,7 +264,7 @@ export class CloudCommands {
         config.intervalMinutes < marketplaceMinInterval
       )
         throw new Error(
-          "Watches that include Facebook Marketplace run at most once daily (1440 minutes).",
+          "Watches that include Facebook Marketplace run at most hourly (60 minutes).",
         );
       config.channelId = opts.channel ?? config.channelId;
       await this.discord.channelAllowed(config.channelId, guild, user);
@@ -325,7 +330,7 @@ export class CloudCommands {
         limit: "1000",
       });
       return {
-        content: `${watches.length} watches · ${watches.filter((w) => w.active).length} active. Dry-run: ${this.config.env.DRY_RUN}. Monitoring: ${this.config.CLOUD_MONITORING_ENABLED}. Facebook Marketplace: ${this.config.env.FACEBOOK_MONITORING_ENABLED ? "enabled, but the Bright Data connector is not implemented yet" : "disabled; Bright Data connector pending"}. Watches that include Marketplace: at most 10 active, daily minimum interval.`,
+        content: `${watches.length} watches · ${watches.filter((w) => w.active).length} active. Dry-run: ${this.config.env.DRY_RUN}. Monitoring: ${this.config.CLOUD_MONITORING_ENABLED}. Facebook Marketplace: ${this.config.env.FACEBOOK_MONITORING_ENABLED ? "enabled" : "disabled"}. Watches that include Marketplace: at most 5 active; up to ${this.config.env.BRIGHT_DATA_MAX_RECORDS_PER_MONTH} Bright Data records per month.`,
       };
     }
     if (command === "alert")

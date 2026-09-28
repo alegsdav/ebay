@@ -22,7 +22,7 @@ export interface CloudDraft {
 }
 export interface Job {
   id: string;
-  kind: "interaction" | "scan" | "listing";
+  kind: "interaction" | "scan" | "listing" | "snapshot";
   payload: any;
   lease_token: string;
   attempts: number;
@@ -85,8 +85,8 @@ export class CloudStore {
       if (response.status === 400) {
         const error = await response.json().catch(() => null);
         const safeMessages = [
-          "Maximum 10 active Marketplace watches. Pause or delete one first.",
-          "Free-tier Marketplace watches require at least 1440 minutes between searches.",
+          "Maximum 5 active Marketplace watches. Pause or delete one first.",
+          "Marketplace watches require at least 60 minutes between searches.",
         ];
         if (safeMessages.includes(error?.message))
           throw new Error(error.message);
@@ -212,6 +212,24 @@ export class CloudStore {
       );
     }
   }
+  // Reserve (positive) or refund (negative) units against a calendar-month cap.
+  async monthlyBudget(service: string, amount: number, limit: number) {
+    return (await this.rpc("scout_take_monthly_budget", {
+      p_service: service,
+      p_amount: amount,
+      p_limit: limit,
+    })) as boolean;
+  }
+  // Listings this watch already processed, so repeats skip extraction and alerts.
+  async seen(watch: string, listings: string[]) {
+    if (!listings.length) return new Set<string>();
+    const rows = await this.rows("scout_processing", {
+      watch_id: `eq.${watch}`,
+      listing_id: `in.(${listings.map((id) => `"${id.replace(/["\\]/g, "")}"`).join(",")})`,
+      select: "listing_id",
+    });
+    return new Set(rows.map((r) => String(r.listing_id)));
+  }
   async cooldown(service: string, until: number) {
     await this.upsert(
       "scout_cooldowns",
@@ -220,7 +238,12 @@ export class CloudStore {
     );
   }
   async enqueue(
-    rows: { dedupe_key: string; kind: Job["kind"]; payload: unknown }[],
+    rows: {
+      dedupe_key: string;
+      kind: Job["kind"];
+      payload: unknown;
+      available_at?: string;
+    }[],
   ) {
     if (rows.length) await this.insert("scout_jobs", rows, "dedupe_key");
   }

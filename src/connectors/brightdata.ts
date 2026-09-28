@@ -1,19 +1,10 @@
 import { Listing, type WatchConfig } from "../config/schema.js";
-import type { Env } from "../config/env.js";
+import { type Env, requireValues } from "../config/env.js";
+import { marketplaceCity } from "../config/preferences.js";
 import { redact } from "../privacy.js";
 import { requestJson } from "./http.js";
-import {
-  assertSourceAccess,
-  type ListingSourceConnector,
-  type SourceListing,
-} from "./source.js";
+import { assertSourceAccess, type SnapshotSourceConnector } from "./source.js";
 
-export class NotImplementedError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "NotImplementedError";
-  }
-}
 export function marketplaceIdentity(value: string) {
   const url = new URL(value);
   const match = /^\/marketplace\/item\/(\d+)\/?$/.exec(url.pathname);
@@ -43,6 +34,7 @@ export interface MarketplaceFacts {
   locationLabel?: string | null;
   deliveryModes?: ("pickup" | "shipping")[];
   status?: NonNullable<Listing["provenance"]>["status"];
+  listedAt?: string | null;
   raw?: unknown;
 }
 // Provider records become canonical listings here: canonical URL/ID, redacted
@@ -67,7 +59,7 @@ export async function marketplaceListing(
     id: `facebook_marketplace:brightdata:${externalId}`,
     source: "facebook_marketplace",
     url,
-    title: evidence.title,
+    title: evidence.title.slice(0, 500),
     description: evidence.description.slice(0, 20000),
     specifics: [],
     price: evidence.price,
@@ -80,6 +72,7 @@ export async function marketplaceListing(
     country: null,
     auction: false,
     endTime: null,
+    listedAt: facts.listedAt ?? null,
     raw: facts.raw ?? null,
     provenance: {
       provider: "brightdata",
@@ -99,18 +92,63 @@ export async function marketplaceListing(
     },
   });
 }
-// Stub: the Bright Data keyword-search request/response contract is not captured yet
-// (see docs/bright-data-setup.md). FACEBOOK_MONITORING_ENABLED defaults false, and the
-// worker skips this source per watch while it is off.
-export class BrightDataSource implements ListingSourceConnector {
+// Facebook shows "New", "Used - Like New", "Used - Good", "Used - Fair".
+export function marketplaceCondition(value: unknown): Listing["condition"] {
+  const c = String(value ?? "").toLowerCase();
+  if (/refurb/.test(c)) return "refurbished";
+  if (/parts|salvage|not working/.test(c)) return "for_parts";
+  if (/^new\b/.test(c)) return "new";
+  if (/used/.test(c)) return "used";
+  return "unknown";
+}
+const isoDate = (value: unknown) => {
+  const t = typeof value === "string" ? Date.parse(value) : NaN;
+  return Number.isFinite(t) ? new Date(t).toISOString() : null;
+};
+// One Bright Data "Facebook Marketplace listings" record. Seller profile IDs,
+// images and videos are deliberately not kept.
+export async function mapBrightDataRecord(r: any, retrievedAt = new Date()) {
+  const price = Number(r?.final_price ?? r?.initial_price);
+  if (r?.currency !== "USD" || !Number.isFinite(price))
+    throw new Error("Missing price or unsupported currency");
+  return marketplaceListing(
+    {
+      url: String(r.url),
+      title: String(r.title ?? ""),
+      description: String(r.description ?? r.seller_description ?? ""),
+      price,
+      condition: marketplaceCondition(r.condition),
+      locationLabel: typeof r.location === "string" ? r.location : null,
+      status: r.is_sold === true ? "sold" : "active",
+      listedAt: isoDate(r.listing_date),
+      raw: {
+        productId: r.product_id ?? null,
+        listingDate: r.listing_date ?? null,
+        condition: r.condition ?? null,
+        initialPrice: r.initial_price ?? null,
+        finalPrice: r.final_price ?? null,
+        rootCategory: r.root_category ?? null,
+      },
+    },
+    retrievedAt,
+  );
+}
+export type SnapshotStatus =
+  "starting" | "running" | "ready" | "failed" | "canceled";
+// Bright Data keyword discovery is asynchronous (1–6 minutes per search): the worker
+// triggers a snapshot, then collects it on a later run. Billing is per returned record.
+export class BrightDataSource implements SnapshotSourceConnector {
   readonly source = "facebook_marketplace";
   readonly provider = "brightdata";
   readonly accessMode = "licensed_provider";
+  private base = "https://api.brightdata.com/datasets/v3";
   constructor(
     private env: Env,
     private budget?: () => void | Promise<void>,
     private signal?: AbortSignal,
-  ) {}
+  ) {
+    requireValues(env, ["BRIGHT_DATA_API_KEY"]);
+  }
   capabilities() {
     return {
       scheduledSearch: true,
@@ -127,23 +165,92 @@ export class BrightDataSource implements ListingSourceConnector {
     );
     if (!watch.sources.includes(this.source))
       throw new Error("Watch does not include Facebook Marketplace.");
-    if (!watch.location)
-      throw new Error("Marketplace searches require a city/postal area.");
+    if (!watch.location || !marketplaceCity(watch.location))
+      throw new Error("Marketplace searches require a city (City, ST).");
   }
   // Its own service name keeps Bright Data budgets and 429 cooldowns separate from eBay/LLM.
-  protected request(url: string, init: RequestInit = {}) {
+  private request(path: string, init: RequestInit = {}, attempts = 3) {
     return requestJson(
-      url,
-      { ...init, signal: this.signal },
+      `${this.base}${path}`,
+      {
+        ...init,
+        signal: this.signal,
+        headers: {
+          Authorization: `Bearer ${this.env.BRIGHT_DATA_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+      },
       "brightdata",
       this.budget,
+      attempts,
     );
   }
-  async *search(watch: WatchConfig): AsyncIterable<SourceListing> {
+  async trigger(
+    watch: WatchConfig,
+    opts: { limit: number; recentOnly: boolean },
+  ) {
     this.validateWatch(watch);
-    throw new NotImplementedError("Bright Data connector not yet implemented.");
+    const query = new URLSearchParams({
+      dataset_id: this.env.BRIGHT_DATA_DATASET_ID,
+      type: "discover_new",
+      discover_by: "keyword",
+      include_errors: "true",
+      limit_per_input: String(opts.limit),
+    });
+    const data = await this.request(
+      `/trigger?${query}`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          input: [
+            {
+              keyword: watch.searchTerms,
+              city: marketplaceCity(watch.location!),
+              radius: watch.location!.radiusMiles,
+              date_listed: opts.recentOnly
+                ? this.env.BRIGHT_DATA_RECENT_FILTER
+                : "",
+            },
+          ],
+        }),
+      },
+      1,
+    );
+    const id = data?.snapshot_id;
+    if (typeof id !== "string" || !/^[\w-]{1,100}$/.test(id))
+      throw new Error("Bright Data did not return a snapshot ID");
+    return id;
   }
-  async detail(_listing: SourceListing): Promise<SourceListing> {
-    throw new NotImplementedError("Bright Data connector not yet implemented.");
+  async progress(id: string): Promise<SnapshotStatus> {
+    const data = await this.request(`/progress/${encodeURIComponent(id)}`);
+    const status = data?.status;
+    if (
+      !["starting", "running", "ready", "failed", "canceled"].includes(status)
+    )
+      throw new Error("Unexpected Bright Data snapshot status");
+    return status;
+  }
+  async download(id: string) {
+    const data = await this.request(
+      `/snapshot/${encodeURIComponent(id)}?format=json`,
+    );
+    if (!Array.isArray(data))
+      throw new Error("Bright Data snapshot is not ready or not a list");
+    const listings: Listing[] = [];
+    let errors = 0,
+      rejected = 0;
+    const now = new Date();
+    for (const r of data) {
+      if (r?.error || r?.error_code) {
+        errors++;
+        continue;
+      }
+      try {
+        listings.push(await mapBrightDataRecord(r, now));
+      } catch {
+        rejected++;
+      }
+    }
+    return { listings, received: data.length - errors, errors, rejected };
   }
 }

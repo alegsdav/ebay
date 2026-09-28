@@ -6,7 +6,7 @@ The bot is a cross-source keyword watcher: one watch searches eBay and Facebook 
 
 ```text
 watch (keywords, filters, sources, area if Marketplace is enabled)
-  -> per enabled source: keyword search (eBay Browse; Bright Data stub)
+  -> per enabled source: keyword search (eBay Browse; Bright Data snapshot, collected later)
   -> cheap filters (excluded keywords, price range, condition, seller rating, buying format)
   -> LLM extraction: is this plausibly the searched-for item, plus the attributes the
      watch's constraints ask about
@@ -25,7 +25,7 @@ Core acceptance coverage:
 | Natural-language watches with confirmation | Gemini/OpenAI → Zod → persisted preview → confirmation/edit/cancel                           |
 | Cross-source keyword search                | Both sources by default; `sources` option opts out; disabled legs skipped per watch          |
 | Authorized listing sources                 | eBay OAuth client credentials and Browse search/item details; Bright Data behind a kill flag |
-| Scheduling                                 | Cron-driven queue, persisted watch interval; Marketplace watches daily, max 10 active        |
+| Scheduling                                 | Cron-driven queue, persisted watch interval; Marketplace hourly, max 5 active watches        |
 | Store/deduplicate                          | Source ID primary key, normalization cache by evidence/intent hash, watch/listing uniqueness |
 | LLM extraction                             | Validated JSON, model/prompt metadata, failures pending retry                                |
 | Matching                                   | One pass/fail decision from filters, relevance and attribute constraints                     |
@@ -36,7 +36,7 @@ Core acceptance coverage:
 
 Auctions and Buy It Now are both watched when the watch's `buying` filter allows them; current bids are labeled provisional. Marketplace listings carry verification warnings for deposit, wire-transfer, gift-card, crypto, stock-photo and shipping-only language. These warn; they never block a match or accuse a seller.
 
-Known gaps are deliberate: the Bright Data adapter is a stub until its request/response contract is captured; no relist similarity detection, digest or near-end repeat alerts, automatic rule learning or administrator notifications. Credential-dependent live acceptance must be checked on the target accounts before declaring production ready.
+Known gaps are deliberate: Bright Data returns results in no guaranteed order, so small hourly polls can miss some new listings; no relist similarity detection, digest or near-end repeat alerts, automatic rule learning or administrator notifications. Credential-dependent live acceptance must be checked on the target accounts before declaring production ready.
 
 Provider references used for implementation:
 

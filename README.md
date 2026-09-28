@@ -2,7 +2,7 @@
 
 A read-only Discord bot that watches free-text keywords on **eBay and Facebook Marketplace at once** and posts each new matching listing to your channel. Describe what you want, confirm Gemini's interpretation, and get one alert per matching listing. There is no category list, sold-price comparison or profit math. The bot never bids, sends offers, checks out, or handles payment credentials.
 
-**Hosting: Supabase PostgreSQL + Edge Functions + Cron** (the only deployment target). See [verified deployment status](docs/deployment-status.md) and [your exact next steps](docs/NEXT-STEPS.md). Automated monitoring remains off and outgoing alerts remain in dry-run. The eBay leg is implemented; the Facebook Marketplace leg uses a Bright Data connector that is still a stub, so Marketplace discovery is not running yet.
+**Hosting: Supabase PostgreSQL + Edge Functions + Cron** (the only deployment target). See [verified deployment status](docs/deployment-status.md) and [your exact next steps](docs/NEXT-STEPS.md). Automated monitoring remains off and outgoing alerts remain in dry-run. The Facebook Marketplace leg polls Bright Data hourly for newly listed items; the eBay leg is implemented but waits for eBay API credentials.
 
 ## Start here
 
@@ -73,7 +73,7 @@ Use `.env.supabase.example` for hosted secrets and `.env.example` for the local 
 
 V1 is US/USD only. Auctions require permitted access and explicit enablement; there are no transaction endpoints. Extracted listing details come from listing text and do not verify authenticity or condition.
 
-Watches that include Facebook Marketplace (the default) are capped at 10 active across the deployment and run at most daily, sized to the Bright Data free-tier budget. eBay-only watches can run hourly.
+Watches that include Facebook Marketplace (the default) are capped at 5 active across the deployment (a testing limit) and run at most hourly. The first Marketplace search for a watch returns up to 10 current listings; later polls ask for 2 recent ones. Bright Data bills every returned record, including repeats the bot has already seen, so a monthly record cap (`BRIGHT_DATA_MAX_RECORDS_PER_MONTH`, default 4,500) stops polling before the free allowance is used up.
 
 The cloud scanner reads one page of up to 50 results per source, queues up to `CLOUD_ITEMS_PER_WATCH` plausible new candidates per source (20 by default), and retries up to 10 previously failed candidates per watch. It is a bounded monitor, not an exhaustive feed. Narrow watches and inspect backlog, call budgets and database usage.
 

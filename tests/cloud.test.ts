@@ -403,3 +403,222 @@ test("real PostgreSQL migration, atomic confirmations, budgets, queue leases and
     await db.close();
   }
 });
+const marketplaceWorker = (extra: Record<string, string> = {}) =>
+  cloudConfig({
+    SUPABASE_URL: "https://test.supabase.co",
+    SUPABASE_SERVICE_ROLE_KEY: "x".repeat(40),
+    DISCORD_PUBLIC_KEY: "a".repeat(64),
+    WORKER_SECRET: "w".repeat(64),
+    DISCORD_TOKEN: "fake-token",
+    DISCORD_APPLICATION_ID: "123",
+    DISCORD_GUILD_ID: "456",
+    CLOUD_MONITORING_ENABLED: "true",
+    DRY_RUN: "true",
+    FACEBOOK_MONITORING_ENABLED: "true",
+    BRIGHT_DATA_API_KEY: "fake-bd-key",
+    GEMINI_API_KEY: "fake-key",
+    ...extra,
+  });
+const fbRecord = (
+  id: string,
+  listed: string,
+  title = "Wireless gaming mouse",
+) => ({
+  url: `https://www.facebook.com/marketplace/item/${id}`,
+  title,
+  final_price: 40,
+  currency: "USD",
+  product_id: id,
+  condition: "Used - Good",
+  description: "Works great",
+  location: "Beaverton, OR",
+  country_code: null,
+  profile_id: "999",
+  listing_date: listed,
+  is_sold: false,
+});
+// A small stateful stand-in for the Supabase tables the Marketplace flow touches.
+function marketplaceDb(budgetLimit = Infinity) {
+  const state = {
+    runs: [] as any[],
+    jobs: [] as any[],
+    processed: new Map<string, string>(),
+    used: 0,
+  };
+  const db = {
+    watch: async () => ({ id: "w", active: true, revision: 1, config: both }),
+    budget: async () => {},
+    cooldown: async () => {},
+    monthlyBudget: async (_s: string, amount: number) => {
+      if (amount > 0 && state.used + amount > budgetLimit) return false;
+      state.used += amount;
+      return true;
+    },
+    rows: async (table: string, params: Record<string, string>) =>
+      table === "scout_ingestion_runs"
+        ? state.runs.filter(
+            (r) =>
+              params.query_key === `eq.${r.query_key}` &&
+              ["running", "succeeded"].includes(r.status),
+          )
+        : [],
+    insert: async (table: string, row: any) => {
+      assert.equal(table, "scout_ingestion_runs");
+      const saved = { id: `run${state.runs.length}`, ...row };
+      state.runs.push(saved);
+      return [saved];
+    },
+    update: async (table: string, params: any, fields: any) => {
+      if (table === "scout_ingestion_runs")
+        Object.assign(
+          state.runs.find((r) => `eq.${r.id}` === params.id),
+          fields,
+        );
+      return [];
+    },
+    enqueue: async (rows: any[]) => state.jobs.push(...rows),
+    seen: async (_w: string, ids: string[]) =>
+      new Set(ids.filter((id) => state.processed.has(id))),
+    saveListing: async () => {},
+    process: async (_w: string, l: string, status: string) =>
+      state.processed.set(l, status),
+  } as unknown as CloudStore;
+  return { db, state };
+}
+function brightData(t: any, snapshots: Record<string, any[]>) {
+  const triggers: any[] = [];
+  let progress = "running";
+  t.mock.method(globalThis, "fetch", async (url: any, init: any) => {
+    const u = new URL(String(url));
+    if (u.hostname !== "api.brightdata.com")
+      throw new Error(`Unexpected request: ${u}`);
+    if (u.pathname === "/datasets/v3/trigger") {
+      triggers.push({
+        limit: u.searchParams.get("limit_per_input"),
+        input: JSON.parse(init.body).input[0],
+      });
+      return Response.json({ snapshot_id: `sd_${triggers.length}` });
+    }
+    if (u.pathname.startsWith("/datasets/v3/progress/"))
+      return Response.json({ status: progress });
+    const id = u.pathname.split("/").pop()!;
+    return Response.json(snapshots[id] ?? []);
+  });
+  return {
+    triggers,
+    ready: () => {
+      progress = "ready";
+    },
+  };
+}
+const job = (kind: any, payload: any, id = "job") => ({
+  id,
+  kind,
+  payload: { watchId: "w", revision: 1, ...payload },
+  lease_token: "l",
+  attempts: 1,
+});
+test("Marketplace polling: first search shows current listings, later hourly polls stay small and skip repeats", async (t) => {
+  const bd = brightData(t, {
+    sd_1: [
+      fbRecord("1", "2026-09-10T00:00:00.000Z"),
+      fbRecord("2", "2026-09-27T00:00:00.000Z"),
+      fbRecord("3", "2026-09-27T12:00:00.000Z", "Mouse, broken wheel"),
+    ],
+    sd_2: [
+      fbRecord("2", "2026-09-27T00:00:00.000Z"),
+      fbRecord("4", "2026-09-28T09:00:00.000Z"),
+    ],
+  });
+  const { db, state } = marketplaceDb();
+  const c = marketplaceWorker();
+  const signal = AbortSignal.timeout(5000);
+  // eBay has no credentials yet: its leg is skipped, not a failure.
+  await processJob(job("scan", {}), c, db, signal);
+  assert.deepEqual(bd.triggers, [
+    {
+      limit: "10",
+      input: {
+        keyword: "wireless gaming mouse",
+        city: "Portland, OR",
+        radius: 25,
+        date_listed: "",
+      },
+    },
+  ]);
+  assert.equal(state.used, 10);
+  const [first] = state.jobs.splice(0);
+  assert.equal(first.kind, "snapshot");
+  assert.ok(Date.parse(first.available_at) > Date.now());
+  // Still running: re-check later without re-triggering (no new charge).
+  await processJob(job("snapshot", first.payload), c, db, signal);
+  const [again] = state.jobs.splice(0);
+  assert.equal(again.dedupe_key, "snapshot:sd_1:1");
+  assert.equal(bd.triggers.length, 1);
+  bd.ready();
+  await processJob(job("snapshot", again.payload), c, db, signal);
+  // 3 records returned: 7 unused reserved records are refunded.
+  assert.equal(state.used, 3);
+  assert.equal(
+    state.processed.get("facebook_marketplace:brightdata:3"),
+    "filtered",
+  );
+  // Newest first; older listings are kept on the first search.
+  assert.deepEqual(
+    state.jobs.splice(0).map((j) => j.payload.listing.id),
+    ["facebook_marketplace:brightdata:2", "facebook_marketplace:brightdata:1"],
+  );
+  assert.equal(state.runs[0].status, "succeeded");
+  assert.equal(state.runs[0].records_received, 3);
+  state.processed.set("facebook_marketplace:brightdata:2", "matched");
+  state.processed.set("facebook_marketplace:brightdata:1", "rejected");
+  // Next hourly poll: 2 recent records; the already-seen one is not re-processed.
+  await processJob(job("scan", {}, "job2"), c, db, signal);
+  assert.deepEqual(bd.triggers[1], {
+    limit: "2",
+    input: {
+      keyword: "wireless gaming mouse",
+      city: "Portland, OR",
+      radius: 25,
+      date_listed: "Last 24 hours",
+    },
+  });
+  const [second] = state.jobs.splice(0);
+  await processJob(job("snapshot", second.payload), c, db, signal);
+  assert.deepEqual(
+    state.jobs.map((j) => j.payload.listing.id),
+    ["facebook_marketplace:brightdata:4"],
+  );
+  assert.equal(state.used, 5);
+});
+test("Marketplace polls stop at the monthly record budget without calling Bright Data", async (t) => {
+  const bd = brightData(t, {});
+  const { db, state } = marketplaceDb(9);
+  await processJob(
+    job("scan", {}),
+    marketplaceWorker(),
+    db,
+    AbortSignal.timeout(5000),
+  );
+  assert.equal(bd.triggers.length, 0);
+  assert.equal(state.jobs.length, 0);
+  assert.equal(state.used, 0);
+});
+test("a failed Marketplace trigger refunds its reserved records", async (t) => {
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async () => new Response("", { status: 400 }),
+  );
+  const { db, state } = marketplaceDb();
+  await assert.rejects(
+    processJob(
+      job("scan", {}),
+      marketplaceWorker(),
+      db,
+      AbortSignal.timeout(5000),
+    ),
+  );
+  assert.equal(state.used, 0);
+  assert.equal(state.runs.length, 0);
+});

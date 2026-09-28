@@ -26,6 +26,8 @@ export const Location = z
       .regex(/^\d{5}$/)
       .nullable(),
     radiusMiles: z.number().min(1).max(100),
+    // "City, ST" for Facebook Marketplace search; derived from a ZIP when needed.
+    city: text.nullable().optional(),
   })
   .strict();
 export const DeliveryModes = z
@@ -158,6 +160,7 @@ export const Listing = z
     country: z.string().nullable(),
     auction: z.boolean(),
     endTime: z.iso.datetime().nullable(),
+    listedAt: z.iso.datetime().nullable().optional(),
     raw: z.unknown(),
     provenance: z
       .object({

@@ -32,18 +32,25 @@ export function updateDefaults(
     throw new Error(
       "First set /defaults with city OR zipcode, radius (miles), and delivery (pickup/shipping/either).",
     );
+  // A new ZIP needs its city resolved again; a city option is the city itself.
+  const city = opts.city
+    ? opts.city
+    : opts.zipcode
+      ? null
+      : (previous?.location.city ?? null);
   return UserDefaults.parse({
     location: {
       label,
       postalCode,
       radiusMiles: opts.radius ?? previous?.location.radiusMiles,
+      city,
     },
     delivery: opts.delivery ?? previous?.delivery,
   });
 }
 export function describeDefaults(value: UserDefaults | null) {
   return value
-    ? `Your defaults: ${value.location.label} · ${value.location.radiusMiles} miles · ${value.delivery}.\nApplied to future watch previews; explicit query settings override these. Existing watches do not change.`
+    ? `Your defaults: ${value.location.label}${value.location.city && value.location.city !== value.location.label ? ` (Facebook Marketplace searches near ${value.location.city})` : ""} · ${value.location.radiusMiles} miles · ${value.delivery}.${marketplaceCity(value.location) ? "" : "\nFacebook Marketplace needs a city: run /defaults city:<City, ST>."}\nApplied to future watch previews; explicit query settings override these. Existing watches do not change.`
     : "No defaults saved. Run /defaults with city OR zipcode, radius (miles), and delivery.";
 }
 
@@ -65,8 +72,14 @@ export const defaultExclusions = [
 ];
 export const sourceLabel = (s: SourceId) =>
   s === "ebay" ? "eBay" : "Facebook Marketplace";
-// Watches that include Marketplace run at most daily (Bright Data free-tier budget).
-export const marketplaceMinInterval = 1440;
+// Marketplace polls ask for few records, so hourly checks stay inside the record budget.
+export const marketplaceMinInterval = 60;
+// Bright Data searches by "City, ST"; a bare ZIP label needs a resolved city.
+export function marketplaceCity(location: z.infer<typeof Location>) {
+  return (
+    location.city ?? (/^\d{5}$/.test(location.label) ? null : location.label)
+  );
+}
 export function prepareWatch(
   parsed: ParsedWatch,
   query: string,
@@ -122,6 +135,10 @@ export function prepareWatch(
     throw new Error(
       "Facebook Marketplace needs a search area. Run /defaults (city OR zipcode, radius, delivery), or choose sources: eBay only.",
     );
+  if (marketplace && !marketplaceCity(location!))
+    throw new Error(
+      "Facebook Marketplace searches by city. Run /defaults city:<City, ST>, name a city in the query, or choose sources: eBay only.",
+    );
   // A revised query replaces keywords and filters; unstated price limits carry over.
   const minPrice =
     parsed.minPrice ?? (parsed.maxPrice === null ? previous?.minPrice : null);
@@ -153,12 +170,10 @@ export function prepareWatch(
     currency: "USD",
     buying: parsed.buying,
     channelId: previous?.channelId ?? channel,
-    intervalMinutes: marketplace
-      ? Math.max(
-          marketplaceMinInterval,
-          previous?.intervalMinutes ?? marketplaceMinInterval,
-        )
-      : (previous?.intervalMinutes ?? 60),
+    intervalMinutes: Math.max(
+      marketplaceMinInterval,
+      previous?.intervalMinutes ?? 60,
+    ),
   });
   const notes = proposals.map(
     (p) =>

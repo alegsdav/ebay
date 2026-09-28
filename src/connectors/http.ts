@@ -14,10 +14,12 @@ export async function requestJson(
   init: RequestInit = {},
   service = "upstream",
   beforeAttempt?: () => void | Promise<void>,
+  // Non-idempotent paid calls pass 1 so a lost response never repeats the charge.
+  attempts = 3,
 ): Promise<any> {
   const blocked = cooldowns.get(service) ?? 0;
   if (blocked > Date.now()) throw new HttpError(429, blocked, service);
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
     await beforeAttempt?.();
     let response: Response;
     try {
@@ -28,7 +30,7 @@ export async function requestJson(
           : AbortSignal.timeout(20000),
       });
     } catch (error) {
-      if (attempt === 2) throw error;
+      if (attempt === attempts - 1) throw error;
       await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
       continue;
     }
@@ -46,7 +48,7 @@ export async function requestJson(
       throw new HttpError(429, retryAt, service);
     }
     if (response.ok) return response.json();
-    if (response.status < 500 || attempt === 2)
+    if (response.status < 500 || attempt === attempts - 1)
       throw new HttpError(response.status, 0, service);
     await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
   }

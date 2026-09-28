@@ -12,26 +12,34 @@ other. Both are on by default and a watch can opt out of either (`sources:` on
 attribute match alone: there is no sold-price, profit or discount gate, no category
 list and no manual listing submission. `/listing evaluate` was removed.
 
-- `src/connectors/brightdata.ts` implements the connector interface as a **stub**.
-  `search()`/`detail()` throw `NotImplementedError` until the Bright Data
-  keyword-search request/response contract is captured (see
-  [bright-data-setup.md](bright-data-setup.md)). It already uses its own
-  `brightdata` service name for request budgets and 429 cooldowns.
-- `marketplaceListing()` turns provider facts into a canonical listing: canonical
-  item URL and ID (`facebook_marketplace:brightdata:<item-id>`), redacted title,
-  description and location, and provenance with an evidence hash. The real adapter
-  should build every record through it.
-- Three gates must all allow a Marketplace search: `FACEBOOK_MONITORING_ENABLED`
-  (defaults `false`), a registered `facebook_marketplace:brightdata:licensed_provider`
-  access triple, and the watch's own `sources`. The worker skips a disabled
-  Marketplace leg per watch and still scans eBay.
-- `scout_source_configs`, `scout_ingestion_runs` and `scout_take_source_budget` exist
-  for provider accounting with terms-review columns, but nothing calls them yet. The
-  stub currently uses the simpler per-service daily budget
-  (`BRIGHT_DATA_MAX_CALLS_PER_DAY`). Choose one when wiring the real adapter.
-- Watches that include Marketplace are capped at 10 active across the deployment and
-  run at most daily. Because Marketplace is now on by default, this cap applies to
-  most watches.
+- `src/connectors/brightdata.ts` calls Bright Data's Facebook Marketplace scraper
+  (dataset `gd_lvt9iwuh6fbcwmx1a`, `type=discover_new&discover_by=keyword`). Input:
+  `keyword`, `city` ("City, ST"), `radius` (miles) and `date_listed`. Searches take
+  1–6 minutes, so a `scan` job triggers a snapshot and a later `snapshot` job polls
+  `/progress` and downloads it. Triggers are never retried automatically.
+- The first search for a watch's keywords and city asks for
+  `BRIGHT_DATA_INITIAL_RECORDS` (10) with no date filter; later hourly polls ask for
+  `BRIGHT_DATA_POLL_RECORDS` (2) with `date_listed` = `BRIGHT_DATA_RECENT_FILTER`.
+  Each run is recorded in `scout_ingestion_runs` with a query key.
+- Bright Data bills every returned record, including listings the bot already saw.
+  Seen listings are skipped before extraction and alerts but still count. Records are
+  reserved against `BRIGHT_DATA_MAX_RECORDS_PER_MONTH` before each trigger
+  (`scout_take_monthly_budget`) and unused ones refunded after download.
+- `mapBrightDataRecord()`/`marketplaceListing()` build canonical listings: canonical
+  URL and ID, redacted text, condition mapping, `listing_date` as `listedAt`, USD only.
+  Seller `profile_id`, images and videos are not kept.
+- Three gates must all allow a search: `FACEBOOK_MONITORING_ENABLED` plus
+  `BRIGHT_DATA_API_KEY`, the registered `facebook_marketplace:brightdata:licensed_provider`
+  triple, and the watch's own `sources`. Disabled legs are skipped per watch.
+- ZIP-only `/defaults` are converted to "City, ST" by Gemini at save time.
+- Watches that include Marketplace: at most 5 active (testing cap), hourly minimum.
+
+Observed in live tests (2026-09-28): a city without a state ("Portland") matched a
+different region; "Portland, OR" with a radius returned Portland-area listings.
+Identical searches returned different listings each time, not sorted by date, and
+"Last 24 hours" still returned older listings. Small polls may therefore miss some
+new listings; the discover-by-URL mode (which could sort newest first) was rejected
+for this account.
 
 ## Recommendation
 
@@ -49,7 +57,7 @@ Use a short proof of concept before committing to a vendor.
 
 | Option                                               | Fit                                                                               | Main concern                                                                                                 | Decision                             |
 | ---------------------------------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------ |
-| Bright Data managed Facebook Marketplace scraper/API | Structured search and listing fields; currently advertises a small free allowance | Confirm the exact product's license, permitted downstream use, billing unit, location coverage and freshness | Selected; connector stubbed          |
+| Bright Data managed Facebook Marketplace scraper/API | Structured search and listing fields; currently advertises a small free allowance | Confirm the exact product's license, permitted downstream use, billing unit, location coverage and freshness | Selected; implemented                |
 | Apify Marketplace actors                             | Fast experiments and a small general free credit                                  | Actors may be community maintained; reliability and compliance obligations vary by actor                     | Fixtures/POC only after terms review |
 | Smaller Marketplace API vendors                      | Potentially simple REST integration                                               | Limited operating history, unclear provenance, retention and support                                         | Do not use without written answers   |
 | Direct in-house scraper                              | Full apparent control                                                             | Conflicts with Meta's permission requirement; fragile login/CAPTCHA/UI surface                               | Rejected                             |
@@ -80,7 +88,7 @@ Natural-language examples:
 /watch create query: Herman Miller Aeron chair size B under $350 sources:Facebook Marketplace only
 ```
 
-The watch preview shows the keywords, sources, price range, conditions, excluded terms and attribute criteria; for Marketplace, the location label, radius and pickup/shipping (never exact coordinates); the polling interval and alert channel; and a notice while Marketplace discovery is not connected.
+The watch preview shows the keywords, sources, price range, conditions, excluded terms and attribute criteria; for Marketplace, the location label, radius and pickup/shipping (never exact coordinates); the polling interval and alert channel; and a notice while Marketplace searching is turned off.
 
 ## Architecture
 
@@ -208,7 +216,7 @@ Configuration:
 
 Operational behavior:
 
-- Start with one location, one narrow keyword watch and the daily interval.
+- Start with one location and one narrow keyword watch.
 - Request the smallest page/result set supported.
 - Stop paging when all records are older than the last successful watermark.
 - Refresh details only for new listings or material price/status changes.
@@ -232,14 +240,12 @@ For suspected cross-posts, retain both source records and create a soft relation
 - Use the source-wide purge procedure, `scout_purge_classifieds('facebook_marketplace')`, to disable the source and delete its listings, queued listing jobs and ingestion evidence. It is destructive and never called automatically.
 - Log the LLM model/prompt version without logging provider or Discord credentials.
 
-## Remaining build sequence
+## Remaining work
 
-1. Capture the Bright Data keyword-search dataset ID, input fields and a redacted sample response.
-2. Implement `BrightDataSource.search()` (and `detail()` if needed) against that contract, building records through `marketplaceListing()`.
-3. Add recorded provider fixtures and contract tests for pagination/snapshots, missing fields, price changes, removal and malformed payloads.
-4. Decide between `scout_source_configs` accounting and the simple per-service budget; enforce a record budget below the monthly free allowance.
-5. Add health checks, quarantine of invalid payloads and operator notifications.
-6. Run a dry-run pilot on one narrow watch before enabling alerts.
+1. Run one narrow watch in dry-run, then with alerts, and compare its hits with Facebook.
+2. If small polls miss too many new listings, ask Bright Data to enable discover-by-URL
+   (a Marketplace search URL sorted by newest) or raise the per-poll record count.
+3. Add health checks, quarantine of invalid payloads and operator notifications.
 
 Do not add browser automation, Facebook login credentials, cookies, proxy rotation or CAPTCHA-solving dependencies during any step.
 

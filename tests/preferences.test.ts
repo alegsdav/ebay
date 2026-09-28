@@ -11,11 +11,16 @@ import { DiscordHttp } from "../src/cloud/discord.js";
 import { cloudConfig } from "../src/cloud/config.js";
 import { commands } from "../src/commands/definitions.js";
 
-const defaults = updateDefaults(null, {
+const zipOnly = updateDefaults(null, {
   zipcode: "97201",
   radius: 25,
   delivery: "pickup",
 });
+// /defaults resolves the ZIP's city with Gemini once, when it is saved.
+const defaults = {
+  ...zipOnly,
+  location: { ...zipOnly.location, city: "Portland, OR" },
+};
 const vague = {
   ...parsed,
   constraints: [],
@@ -63,7 +68,7 @@ test("defaults validate location, radius, delivery and preserve partial updates"
 test("recommendations become editable draft criteria for a both-source watch", () => {
   const result = prepare();
   assert.deepEqual(result.config.sources, ["ebay", "facebook_marketplace"]);
-  assert.equal(result.config.intervalMinutes, 1440);
+  assert.equal(result.config.intervalMinutes, 60);
   assert.deepEqual(result.config.location, defaults.location);
   assert.deepEqual(result.config.deliveryModes, ["pickup"]);
   assert.equal(result.config.maxPrice, 85);
@@ -77,7 +82,8 @@ test("recommendations become editable draft criteria for a both-source watch", (
   assert.match(msg.content!, /Confirm recommendation/);
   assert.match(msg.content!, /50 g/);
   assert.match(msg.content!, /eBay \+ Facebook Marketplace/);
-  assert.match(msg.content!, /not connected yet/);
+  assert.match(msg.content!, /turned off right now/);
+  assert.match(msg.content!, /near Portland, OR/);
   assert.match(msg.content!, /<#channel>/);
   assert.doesNotMatch(
     msg.content!,
@@ -85,7 +91,7 @@ test("recommendations become editable draft criteria for a both-source watch", (
   );
   assert.doesNotMatch(
     preview(result.config, "draft", result.notes, true).content!,
-    /not connected/,
+    /turned off/,
   );
 });
 
@@ -167,16 +173,27 @@ test("updates replace criteria but keep unstated sources, area, price limits, ch
   ).config;
   assert.equal(priced.minPrice, null);
   assert.equal(priced.maxPrice, 30);
-  // Adding Marketplace to an hourly watch enforces the daily minimum.
+  // Adding Marketplace keeps the watch's frequency (hourly minimum).
   const widened = prepareWatch(
     parsed,
     "mouse",
     "c",
     defaults,
-    previous,
+    { ...previous, intervalMinutes: 30 },
     "both",
   ).config;
-  assert.equal(widened.intervalMinutes, 1440);
+  assert.equal(widened.intervalMinutes, 60);
+  assert.equal(widened.location!.city, "Portland, OR");
+  // A ZIP without a resolved city cannot drive a Marketplace search.
+  assert.throws(
+    () => prepareWatch(parsed, "mouse", "c", zipOnly),
+    /searches by city/,
+  );
+  assert.equal(
+    prepareWatch(parsed, "mouse", "c", zipOnly, undefined, "ebay_only").config
+      .location,
+    null,
+  );
 });
 
 test("explicit settings win; unresolved/conflicting/invalid interpretations cannot be confirmed", () => {
@@ -270,6 +287,10 @@ test("cloud /defaults reads and writes without using Gemini", async (t) => {
       normalize: async () => {
         throw new Error("Must not call Gemini");
       },
+      resolveCity: async (zip: string) => {
+        assert.equal(zip, "97201");
+        return "Portland, OR";
+      },
     },
     config,
   );
@@ -289,7 +310,9 @@ test("cloud /defaults reads and writes without using Gemini", async (t) => {
       ],
     },
   };
-  assert.match((await handler.run(i)).content!, /Saved/);
+  const reply = (await handler.run(i)).content!;
+  assert.match(reply, /Saved/);
+  assert.match(reply, /searches near Portland, OR/);
   assert.deepEqual(saved, defaults);
   assert.match(
     (await handler.run({ ...i, data: { name: "defaults", options: [] } }))
@@ -309,6 +332,7 @@ test("PostgreSQL enforces default privacy and caps watches that include Marketpl
       "202609240001_classifieds.sql",
       "202609240002_preferences.sql",
       "202609280001_keyword_watch.sql",
+      "202609290001_marketplace_polling.sql",
     ])
       await db.exec(readFileSync(`supabase/migrations/${file}`, "utf8"));
     await db.query(
@@ -321,7 +345,7 @@ test("PostgreSQL enforces default privacy and caps watches that include Marketpl
       await db.exec("reset role;");
     }
     const config = JSON.stringify(prepare().config);
-    for (let n = 0; n < 10; n++)
+    for (let n = 0; n < 5; n++)
       await db.query(
         "insert into scout_watches(owner_id,guild_id,config) values($1,'guild',$2)",
         [`user${n}`, config],
@@ -331,7 +355,7 @@ test("PostgreSQL enforces default privacy and caps watches that include Marketpl
         "insert into scout_watches(owner_id,guild_id,config) values('extra','guild',$1)",
         [config],
       ),
-      /Maximum 10/,
+      /Maximum 5/,
     );
     await db.exec(
       "update scout_watches set active=false where owner_id='user0'",
@@ -339,9 +363,9 @@ test("PostgreSQL enforces default privacy and caps watches that include Marketpl
     await assert.rejects(
       db.query(
         "insert into scout_watches(owner_id,guild_id,config) values('extra','guild',$1)",
-        [JSON.stringify({ ...prepare().config, intervalMinutes: 60 })],
+        [JSON.stringify({ ...prepare().config, intervalMinutes: 30 })],
       ),
-      /1440/,
+      /60 minutes/,
     );
     await db.query(
       "insert into scout_watches(owner_id,guild_id,config) values('extra','guild',$1)",
@@ -349,9 +373,9 @@ test("PostgreSQL enforces default privacy and caps watches that include Marketpl
     );
     await assert.rejects(
       db.exec("update scout_watches set active=true where owner_id='user0'"),
-      /Maximum 10/,
+      /Maximum 5/,
     );
-    // eBay-only watches are outside the Marketplace budget cap and daily cadence.
+    // eBay-only watches are outside the Marketplace cap.
     await db.query(
       "insert into scout_watches(owner_id,guild_id,config) values('ebay','guild',$1)",
       [
