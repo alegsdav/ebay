@@ -3,8 +3,11 @@ import {
   prepareWatch,
   describeDefaults,
   updateDefaults,
+  sourceChoices,
+  sourceLabel,
+  marketplaceMinInterval,
+  type SourceChoice,
 } from "../config/preferences.js";
-import { feeDefaults } from "../config/env.js";
 import { type Interpreter } from "../llm/client.js";
 import { CloudStore, type CloudWatch } from "./store.js";
 import {
@@ -16,15 +19,10 @@ import {
   type Interaction,
   type Message,
   alertMessage,
+  feedbackActions,
 } from "./discord.js";
 import type { CloudConfig } from "./config.js";
 import { samplePayload } from "../fixtures.js";
-import {
-  manualDraft,
-  manualPreview,
-  evaluateManual,
-  ManualDraft,
-} from "../connectors/manual.js";
 export function authorized(i: Interaction, c: CloudConfig) {
   if (
     i.application_id !== c.env.DISCORD_APPLICATION_ID ||
@@ -55,9 +53,12 @@ export class CloudCommands {
     channel: string,
     watch?: CloudWatch,
     base?: WatchConfig,
+    sources?: string,
   ) {
     if (!query || query.length > 2000)
       throw new Error("Use a query of 1–2000 characters.");
+    if (sources !== undefined && !Object.hasOwn(sourceChoices, sources))
+      throw new Error("Unsupported sources option.");
     const previous = base ?? watch?.config;
     const defaults = await this.db.defaults(actor(i), i.guild_id!);
     const parsed = await this.llm.parseWatch(query, defaults);
@@ -65,35 +66,16 @@ export class CloudCommands {
       parsed,
       query,
       channel,
-      previous?.fees ?? feeDefaults(this.config.env),
       defaults,
       previous,
+      sources as SourceChoice | undefined,
     );
-    let config = prepared.config;
-    if (previous)
-      config = {
-        ...config,
-        channelId: previous.channelId,
-        possibleChannelId: previous.possibleChannelId,
-        intervalMinutes:
-          config.purpose === "match"
-            ? Math.max(1440, previous.intervalMinutes)
-            : previous.intervalMinutes,
-        minComparables: previous.minComparables,
-        lookbackDays: previous.lookbackDays,
-        minConfidence: previous.minConfidence,
-      };
+    const config = prepared.config;
     if (config.buying !== "fixed" && !this.config.env.EBAY_ALLOW_AUCTIONS)
       throw new Error(
         "Auction access is disabled. Use fixed-price criteria until authorized auction access is configured.",
       );
     await this.discord.channelAllowed(config.channelId, i.guild_id!, actor(i));
-    if (config.possibleChannelId)
-      await this.discord.channelAllowed(
-        config.possibleChannelId,
-        i.guild_id!,
-        actor(i),
-      );
     const d = await this.db.createDraft(
       actor(i),
       i.guild_id!,
@@ -102,11 +84,16 @@ export class CloudCommands {
       i.id,
       watch,
     );
-    return preview(d.config, d.id, [
-      ...prepared.notes,
-      ...parsed.assumptions,
-      ...parsed.clarifications.map((q) => `Unresolved: ${q}`),
-    ]);
+    return preview(
+      d.config,
+      d.id,
+      [
+        ...prepared.notes,
+        ...parsed.assumptions,
+        ...parsed.clarifications.map((q) => `Unresolved: ${q}`),
+      ],
+      this.config.env.FACEBOOK_MONITORING_ENABLED,
+    );
   }
   async run(i: Interaction): Promise<Message> {
     authorized(i, this.config);
@@ -115,37 +102,6 @@ export class CloudCommands {
     if (i.type === 3) {
       const [kind, action, id] = String(i.data.custom_id).split(":");
       if (!id) throw new Error("Invalid button");
-      if (kind === "manual") {
-        if (!["confirm", "cancel"].includes(action!))
-          throw new Error("Invalid manual action");
-        const draft = ManualDraft.parse(
-          await this.db.rpc("scout_consume_submission", {
-            p_id: id,
-            p_owner: user,
-            p_guild: guild,
-          }),
-        );
-        if (action === "cancel")
-          return { content: "Evaluation cancelled.", components: [] };
-        const result = await evaluateManual(
-          draft,
-          this.llm,
-          await this.db.comparables(
-            draft.config.category,
-            draft.config.lookbackDays,
-          ),
-        );
-        await this.db.insert("scout_evaluations", {
-          id,
-          owner_id: user,
-          guild_id: guild,
-          data: result,
-        });
-        return {
-          ...result,
-          content: `${result.content}\nEvidence ID: ${id} (available with /listing details for 30 days).`,
-        };
-      }
       if (kind === "draft") {
         const d = await this.db.draft(id, user, guild);
         if (action === "cancel") {
@@ -157,31 +113,39 @@ export class CloudCommands {
         }
         if (action !== "create") throw new Error("Unsupported draft action");
         await this.discord.channelAllowed(d.config.channelId, guild, user);
-        if (d.config.possibleChannelId)
-          await this.discord.channelAllowed(
-            d.config.possibleChannelId,
-            guild,
-            user,
-          );
         const watchId = await this.db.rpc("scout_confirm_draft", {
           p_id: id,
           p_owner: user,
           p_guild: guild,
         });
+        const facebookPending =
+          d.config.sources.includes("facebook_marketplace") &&
+          !this.config.env.FACEBOOK_MONITORING_ENABLED;
         return {
-          content:
-            d.config.purpose === "match"
-              ? `Watch saved: \`${watchId}\`. Your criteria are confirmed. Facebook discovery is NOT running yet: Bright Data still needs to be connected. You do not need /listing evaluate.`
-              : `Watch saved: \`${watchId}\`. ${this.config.CLOUD_MONITORING_ENABLED ? "Scheduled monitoring is enabled." : "Monitoring is OFF until you enable CLOUD_MONITORING_ENABLED."} ${this.config.env.DRY_RUN ? "Dry-run is ON; opportunity posts are suppressed." : ""}`,
+          content: [
+            `Watch saved: \`${watchId}\`. Sources: ${d.config.sources.map(sourceLabel).join(" + ")}.`,
+            this.config.CLOUD_MONITORING_ENABLED
+              ? "Scheduled monitoring is enabled."
+              : "Monitoring is OFF until you enable CLOUD_MONITORING_ENABLED.",
+            ...(facebookPending
+              ? [
+                  "Facebook Marketplace discovery is not connected yet; that leg is skipped until it is.",
+                ]
+              : []),
+            ...(this.config.env.DRY_RUN
+              ? ["Dry-run is ON; match posts are suppressed."]
+              : []),
+          ].join(" "),
           components: [],
         };
       }
-      if (
-        kind === "feedback" &&
-        ["reviewed", "saved", "dismissed", "incorrect_match"].includes(action!)
-      ) {
-        await this.feedback(id, user, guild, action!);
-        return { content: `Recorded: ${action}.` };
+      // incorrect_match is the pre-rework label on older alert buttons.
+      const feedback = action === "incorrect_match" ? "not_relevant" : action!;
+      if (kind === "feedback" && Object.hasOwn(feedbackActions, feedback)) {
+        await this.feedback(id, user, guild, feedback);
+        return {
+          content: `Recorded: ${feedbackActions[feedback as keyof typeof feedbackActions]}.`,
+        };
       }
       throw new Error("Unsupported button");
     }
@@ -217,7 +181,14 @@ export class CloudCommands {
     }
     if (command === "watch") {
       if (sub === "create")
-        return this.parse(i, opts.query, opts.channel ?? i.channel_id);
+        return this.parse(
+          i,
+          opts.query,
+          opts.channel ?? i.channel_id,
+          undefined,
+          undefined,
+          opts.sources,
+        );
       if (sub === "list") {
         const rows = await this.db.rows("scout_watches", {
           owner_id: `eq.${user}`,
@@ -230,7 +201,7 @@ export class CloudCommands {
             ? rows
                 .map(
                   (w) =>
-                    `${w.active ? "Active" : "Paused"} · ${w.config.name} · \`${w.id}\``,
+                    `${w.active ? "Active" : "Paused"} · ${w.config.name} · ${(w.config.sources ?? []).map(sourceLabel).join(" + ")} · \`${w.id}\``,
                 )
                 .join("\n")
                 .slice(0, 1900)
@@ -242,7 +213,14 @@ export class CloudCommands {
       }
       const w = await this.owned(opts.id, i);
       if (sub === "update")
-        return this.parse(i, opts.query, w.config.channelId, w);
+        return this.parse(
+          i,
+          opts.query,
+          w.config.channelId,
+          w,
+          undefined,
+          opts.sources,
+        );
       if (sub === "delete") {
         await this.db.remove("scout_watches", {
           id: `eq.${w.id}`,
@@ -263,31 +241,28 @@ export class CloudCommands {
     if (command === "settings") {
       const w = await this.owned(opts.id, i),
         config = { ...w.config };
-      const keys = {
-        discount: "minDiscountPercent",
-        profit: "minProfit",
-        confidence: "minConfidence",
-        comparables: "minComparables",
-        lookback: "lookbackDays",
-        frequency: "intervalMinutes",
-      } as const;
-      for (const [name, key] of Object.entries(keys))
-        if (opts[name] !== undefined) config[key] = opts[name];
-      if (config.purpose === "match" && config.intervalMinutes < 1440)
+      if (opts.clear_price_limits) {
+        config.minPrice = null;
+        config.maxPrice = null;
+      }
+      if (opts.min_price !== undefined) config.minPrice = opts.min_price;
+      if (opts.max_price !== undefined) config.maxPrice = opts.max_price;
+      if (
+        config.minPrice !== null &&
+        config.maxPrice !== null &&
+        config.minPrice > config.maxPrice
+      )
+        throw new Error("Minimum price exceeds maximum price.");
+      if (opts.frequency !== undefined) config.intervalMinutes = opts.frequency;
+      if (
+        config.sources.includes("facebook_marketplace") &&
+        config.intervalMinutes < marketplaceMinInterval
+      )
         throw new Error(
-          "Free-tier Marketplace searches run at most once daily (1440 minutes).",
+          "Watches that include Facebook Marketplace run at most once daily (1440 minutes).",
         );
       config.channelId = opts.channel ?? config.channelId;
-      config.possibleChannelId = opts.disable_possible
-        ? null
-        : (opts.possible_channel ?? config.possibleChannelId);
       await this.discord.channelAllowed(config.channelId, guild, user);
-      if (config.possibleChannelId)
-        await this.discord.channelAllowed(
-          config.possibleChannelId,
-          guild,
-          user,
-        );
       const d = await this.db.createDraft(
         user,
         guild,
@@ -296,16 +271,14 @@ export class CloudCommands {
         i.id,
         w,
       );
-      return preview(d.config, d.id);
+      return preview(
+        d.config,
+        d.id,
+        [],
+        this.config.env.FACEBOOK_MONITORING_ENABLED,
+      );
     }
     if (command === "listing") {
-      if (sub === "evaluate") {
-        const watch = await this.owned(opts.watch, i);
-        const { watch: _watch, ...input } = opts;
-        const draft = await manualDraft(input, watch.config);
-        const row = await this.db.createSubmission(user, guild, i.id, draft);
-        return manualPreview(ManualDraft.parse(row.data), row.id);
-      }
       if (sub === "saved") {
         const rows = await this.db.rows("scout_feedback", {
           user_id: `eq.${user}`,
@@ -327,17 +300,6 @@ export class CloudCommands {
             },
           ],
         };
-      }
-      if (sub === "details") {
-        const result = (
-          await this.db.rows("scout_evaluations", {
-            id: `eq.${opts.alert}`,
-            owner_id: `eq.${user}`,
-            guild_id: `eq.${guild}`,
-            expires_at: `gt.${new Date().toISOString()}`,
-          })
-        )[0];
-        if (result) return result.data;
       }
       const a = await this.alert(opts.alert, user, guild);
       if (!a) throw new Error("Alert not found or not owned by you.");
@@ -363,13 +325,13 @@ export class CloudCommands {
         limit: "1000",
       });
       return {
-        content: `${watches.length} watches · ${watches.filter((w) => w.active).length} active. Dry-run: ${this.config.env.DRY_RUN}. Monitoring: ${this.config.CLOUD_MONITORING_ENABLED}. Facebook discovery: not connected. Marketplace cap: 10 active watches, daily minimum interval. No Bright Data calls are being made.`,
+        content: `${watches.length} watches · ${watches.filter((w) => w.active).length} active. Dry-run: ${this.config.env.DRY_RUN}. Monitoring: ${this.config.CLOUD_MONITORING_ENABLED}. Facebook Marketplace: ${this.config.env.FACEBOOK_MONITORING_ENABLED ? "enabled, but the Bright Data connector is not implemented yet" : "disabled; Bright Data connector pending"}. Watches that include Marketplace: at most 10 active, daily minimum interval.`,
       };
     }
     if (command === "alert")
       return {
         ...alertMessage(samplePayload(), "synthetic-demo"),
-        content: "SYNTHETIC TEST — fabricated example, not a real opportunity.",
+        content: "SYNTHETIC TEST — fabricated example, not a real listing.",
         components: [],
       };
     throw new Error("Unknown command");

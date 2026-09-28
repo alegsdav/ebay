@@ -1,11 +1,10 @@
 import { z } from "zod";
 import {
   Location,
+  WatchConfig,
   type ParsedWatch,
-  type WatchConfig,
-  type Fees,
+  type SourceId,
 } from "./schema.js";
-import { resolveWatch } from "./categories.js";
 
 export const UserDefaults = z
   .object({
@@ -48,17 +47,41 @@ export function describeDefaults(value: UserDefaults | null) {
     : "No defaults saved. Run /defaults with city OR zipcode, radius (miles), and delivery.";
 }
 
+export const allSources: SourceId[] = ["ebay", "facebook_marketplace"];
+// Discord `sources` option on /watch create and /watch update.
+export const sourceChoices = {
+  both: allSources,
+  ebay_only: ["ebay"],
+  facebook_only: ["facebook_marketplace"],
+} as const satisfies Record<string, readonly SourceId[]>;
+export type SourceChoice = keyof typeof sourceChoices;
+export const defaultExclusions = [
+  "for parts",
+  "repair only",
+  "broken",
+  "empty box",
+  "manual only",
+  "replica",
+];
+export const sourceLabel = (s: SourceId) =>
+  s === "ebay" ? "eBay" : "Facebook Marketplace";
+// Watches that include Marketplace run at most daily (Bright Data free-tier budget).
+export const marketplaceMinInterval = 1440;
 export function prepareWatch(
   parsed: ParsedWatch,
   query: string,
   channel: string,
-  fees: Fees,
   defaults: UserDefaults | null,
   previous?: WatchConfig,
+  sourceChoice?: SourceChoice,
 ) {
   if (parsed.clarifications.length)
     throw new Error(
       `Please clarify your request: ${parsed.clarifications.join("; ")}`,
+    );
+  if (parsed.confidence < 0.65)
+    throw new Error(
+      "Watch interpretation is uncertain. Please make the request more specific.",
     );
   const proposals = parsed.recommendations ?? [];
   const keys = new Set(parsed.constraints.map((c) => c.key));
@@ -78,11 +101,13 @@ export function prepareWatch(
       );
     keys.add(proposal.constraint.key);
   }
-  const sources = parsed.sources ??
-    previous?.sources ?? ["facebook_marketplace"];
+  // Explicit command option > query wording > previous watch > both sources.
+  const sources = [
+    ...(sourceChoice
+      ? sourceChoices[sourceChoice]
+      : (parsed.sources ?? previous?.sources ?? allSources)),
+  ];
   const marketplace = sources.includes("facebook_marketplace");
-  if (sources.length !== 1)
-    throw new Error("Use a separate watch for each marketplace.");
   const location =
     parsed.location ?? previous?.location ?? defaults?.location ?? null;
   const deliveryModes =
@@ -95,34 +120,49 @@ export function prepareWatch(
       : null);
   if (marketplace && (!location || !deliveryModes))
     throw new Error(
-      "Set /defaults first: city OR zipcode, radius, and delivery. Then create your watch again.",
+      "Facebook Marketplace needs a search area. Run /defaults (city OR zipcode, radius, delivery), or choose sources: eBay only.",
     );
-  const config = resolveWatch(
-    {
-      ...parsed,
-      sources,
-      location,
-      deliveryModes: deliveryModes ? [...deliveryModes] : null,
-      constraints: [
-        ...parsed.constraints,
-        ...proposals.map((p) => p.constraint),
-      ],
-    },
-    query,
-    channel,
-    fees,
-    true,
-  );
-  config.rawQuery = query;
-  config.sources = sources;
-  if (marketplace) {
-    config.purpose = "match";
-    config.intervalMinutes = 1440;
-    config.maxAskingPrice = parsed.maxAskingPrice ?? parsed.maxAllIn;
-  }
+  // A revised query replaces keywords and filters; unstated price limits carry over.
+  const minPrice =
+    parsed.minPrice ?? (parsed.maxPrice === null ? previous?.minPrice : null);
+  const maxPrice =
+    parsed.maxPrice ?? (parsed.minPrice === null ? previous?.maxPrice : null);
+  const searched = parsed.searchTerms.toLowerCase();
+  const config = WatchConfig.parse({
+    name: parsed.name,
+    rawQuery: query,
+    searchTerms: parsed.searchTerms,
+    // Keep a default exclusion out when the search itself asks for it.
+    excludedKeywords: [
+      ...new Set([
+        ...defaultExclusions.filter((k) => !searched.includes(k)),
+        ...parsed.excludedKeywords,
+      ]),
+    ],
+    constraints: [...parsed.constraints, ...proposals.map((p) => p.constraint)],
+    conditions: parsed.conditions,
+    sources,
+    location: marketplace ? location : null,
+    deliveryModes: marketplace && deliveryModes ? [...deliveryModes] : null,
+    estimatedTravelCost:
+      parsed.estimatedTravelCost ?? previous?.estimatedTravelCost ?? 0,
+    minPrice: minPrice ?? null,
+    maxPrice: maxPrice ?? null,
+    minSellerPercent: parsed.minSellerPercent,
+    country: "US",
+    currency: "USD",
+    buying: parsed.buying,
+    channelId: previous?.channelId ?? channel,
+    intervalMinutes: marketplace
+      ? Math.max(
+          marketplaceMinInterval,
+          previous?.intervalMinutes ?? marketplaceMinInterval,
+        )
+      : (previous?.intervalMinutes ?? 60),
+  });
   const notes = proposals.map(
     (p) =>
-      `Confirm recommendation: “${p.phrase.slice(0, 40)}” → ${p.constraint.key} ${p.constraint.operator === "lte" ? "≤" : "≥"} ${p.constraint.value.slice(0, 12)}${p.constraint.key === "weight_grams" ? " g" : ""}. ${p.reason.slice(0, 60)}`,
+      `Confirm recommendation: “${p.phrase.slice(0, 40)}” → ${p.constraint.key} ${p.constraint.operator === "lte" ? "≤" : "≥"} ${p.constraint.value.slice(0, 12)}${p.constraint.key.endsWith("_grams") ? " g" : ""}. ${p.reason.slice(0, 60)}`,
   );
   // Prefill the existing edit modal with concrete proposed values, so users can change them.
   const editableQuery = proposals.length

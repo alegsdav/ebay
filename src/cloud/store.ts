@@ -1,9 +1,4 @@
-import {
-  Comparable,
-  Normalized,
-  WatchConfig,
-  type Listing,
-} from "../config/schema.js";
+import { Normalized, WatchConfig, type Listing } from "../config/schema.js";
 import { HttpError } from "../connectors/http.js";
 import { UserDefaults } from "../config/preferences.js";
 export interface CloudWatch {
@@ -47,29 +42,6 @@ export class CloudStore {
       "scout_user_defaults",
       { owner_id: owner, guild_id: guild, config: UserDefaults.parse(config) },
       "owner_id,guild_id",
-    );
-  }
-  async createSubmission(
-    owner: string,
-    guild: string,
-    interaction: string,
-    data: unknown,
-  ) {
-    await this.rpc("scout_cleanup_classifieds");
-    const rows = await this.insert(
-      "scout_submissions",
-      { owner_id: owner, guild_id: guild, interaction_id: interaction, data },
-      "interaction_id",
-    );
-    return (
-      rows[0] ??
-      (
-        await this.rows("scout_submissions", {
-          interaction_id: `eq.${interaction}`,
-          owner_id: `eq.${owner}`,
-          guild_id: `eq.${guild}`,
-        })
-      )[0]
     );
   }
   sourceConfigs() {
@@ -277,42 +249,14 @@ export class CloudStore {
       "watch_id,listing_id",
     );
   }
-  async normalized(listing: string, category: string, hash: string) {
+  // The hash covers listing evidence, model, prompt and the watch's search intent.
+  async normalized(listing: string, hash: string) {
     const row = (
       await this.rows("scout_normalized", {
         listing_id: `eq.${listing}`,
-        category: `eq.${category}`,
         hash: `eq.${hash}`,
       })
     )[0];
     return row ? Normalized.parse(row.data) : null;
-  }
-  async comparables(category: string, lookback: number) {
-    return (
-      await this.rows("scout_comparables", {
-        category: `eq.${category}`,
-        sale_date: `gte.${new Date(Date.now() - lookback * 86400000).toISOString()}`,
-        limit: "1000",
-      })
-    ).map((r) => Comparable.parse(r.data));
-  }
-  async importComparables(input: unknown) {
-    const rows = Comparable.array().min(1).max(10000).parse(input);
-    for (const r of rows)
-      if (
-        Date.parse(r.saleDate) > Date.now() ||
-        Date.parse(r.retrievedAt) > Date.now() ||
-        Date.parse(r.retrievedAt) < Date.parse(r.saleDate)
-      )
-        throw new Error("Invalid sale dates");
-    return this.rpc("scout_import_comparables", {
-      p_rows: rows.map((c) => ({
-        id: `${c.source}:${c.id}`,
-        source_url: new URL(c.sourceUrl).origin + new URL(c.sourceUrl).pathname,
-        category: c.category,
-        sale_date: c.saleDate,
-        data: c,
-      })),
-    });
   }
 }

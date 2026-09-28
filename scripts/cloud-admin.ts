@@ -1,5 +1,3 @@
-import { readFileSync } from "node:fs";
-import { CloudStore } from "../src/cloud/store.js";
 import { getEnv } from "../src/config/env.js";
 const mode = process.argv[2];
 if (mode === "model") {
@@ -24,17 +22,4 @@ if (mode === "model") {
       2,
     ),
   );
-} else if (mode === "import") {
-  const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env;
-  const file = process.argv[3];
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !file)
-    throw new Error(
-      "Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY locally; pass verified-sales.json.",
-    );
-  const db = new CloudStore(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-  console.log({
-    imported: await db.importComparables(
-      JSON.parse(readFileSync(file, "utf8")),
-    ),
-  });
-} else throw new Error("Usage: cloud-admin.ts model | import <file>");
+} else throw new Error("Usage: cloud-admin.ts model");

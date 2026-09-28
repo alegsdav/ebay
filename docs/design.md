@@ -1,33 +1,42 @@
-# V1 design decisions and acceptance coverage
+# Design decisions and acceptance coverage
 
-The hosted architecture now uses Supabase PostgreSQL, signed Discord HTTP interactions, leased queue jobs, Edge Functions and Cron. The original local gateway/SQLite implementation remains available for offline development. See [the deployment guide](supabase-setup.md).
+The hosted architecture uses Supabase PostgreSQL, signed Discord HTTP interactions, leased queue jobs, Edge Functions and Cron. It is the only deployment target. See [the deployment guide](supabase-setup.md).
 
-The multi-category revision of the PRD is authoritative. This build uses a shared watch and pricing pipeline, with category templates controlling allowable attribute names, marketplace categories, identity matching and risk signals.
+The bot is a cross-source keyword watcher: one watch searches eBay and Facebook Marketplace by default and posts each new matching listing once to its channel. There is no fixed category list, sold-price comparison, profit or discount math, or strong/possible tiering. A user may opt a watch out of either source.
 
-The model proposes interpretation and extracts evidence; server-side schemas validate the result. Search IDs, URLs used for API access, credentials, arithmetic, thresholds, storage and notification decisions stay in application code. Listing text is untrusted data; models have no tools or transaction capabilities. Prompts receive listing title, limited description, item specifics and condition, not seller personal data or application credentials.
+```text
+watch (keywords, filters, sources, area if Marketplace is enabled)
+  -> per enabled source: keyword search (eBay Browse; Bright Data stub)
+  -> cheap filters (excluded keywords, price range, condition, seller rating, buying format)
+  -> LLM extraction: is this plausibly the searched-for item, plus the attributes the
+     watch's constraints ask about
+  -> constraint check (freeform key/operator/value against extracted attributes)
+  -> single Discord alert to the watch's channel, or silent storage if rejected
+```
 
-Vague queries are previewed with explicit defaults and unresolved questions. A user can edit before saving. The full JSON attachment prevents long configurations from being hidden by Discord message limits. A confirmation stores exactly the previewed configuration. Drafts are durable, user/server-bound, expire after 15 minutes and can only be consumed once; edits to an existing watch use a revision check.
+The model proposes interpretation and extracts evidence; server-side schemas validate the result. Search requests, credentials, filters, storage and notification decisions stay in application code. Listing text is untrusted data; models have no tools or transaction capabilities. Prompts receive listing title, limited description, item specifics and condition, not seller personal data or application credentials. Marketplace text is redacted (email, phone, street address) before storage or LLM calls.
+
+Vague queries are previewed with explicit defaults, proposed numeric interpretations and unresolved questions. A user can edit before saving. The full JSON attachment prevents long configurations from being hidden by Discord message limits. A confirmation stores exactly the previewed configuration. Drafts are durable, user/server-bound, expire after 15 minutes and can only be consumed once; edits to an existing watch use a revision check. `/watch update` replaces keywords and filters; unstated sources, search area and price limits carry over, as do the channel and frequency.
 
 Core acceptance coverage:
 
-| PRD capability                             | Implementation                                                                      |
-| ------------------------------------------ | ----------------------------------------------------------------------------------- |
-| Natural-language watches with confirmation | Gemini/OpenAI → Zod → persisted preview → confirmation/edit/cancel                  |
-| Multiple categories                        | Six templates, validated taxonomy IDs; exact scope in operations guide              |
-| Authorized listing source                  | eBay OAuth client credentials, Browse search/item details, Taxonomy validation      |
-| Hourly scheduling                          | Process scheduler plus SQLite lease and persisted watch interval                    |
-| Store/deduplicate                          | Source ID primary key, normalized evidence hash, watch/listing alert uniqueness     |
-| LLM normalization                          | Validated JSON, model/prompt metadata, failures pending retry                       |
-| Comparable sale records                    | Transactional validated imports with source evidence and deduplication              |
-| Financial calculations                     | Integer cents, delivered-sale median, fee/tax/reserve breakdown and modeled bid cap |
-| Discord alerts and evidence                | Embeds, source/evidence links, details JSON, warnings, confidence and tiers         |
-| Review/dismiss                             | Owner-bound buttons and slash commands, persistent feedback                         |
-| Failure visibility                         | Structured events and pending/delivery status records                               |
-| No transactions                            | No offer, bid, checkout or payment integration                                      |
+| Capability                                 | Implementation                                                                               |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| Natural-language watches with confirmation | Gemini/OpenAI → Zod → persisted preview → confirmation/edit/cancel                           |
+| Cross-source keyword search                | Both sources by default; `sources` option opts out; disabled legs skipped per watch          |
+| Authorized listing sources                 | eBay OAuth client credentials and Browse search/item details; Bright Data behind a kill flag |
+| Scheduling                                 | Cron-driven queue, persisted watch interval; Marketplace watches daily, max 10 active        |
+| Store/deduplicate                          | Source ID primary key, normalization cache by evidence/intent hash, watch/listing uniqueness |
+| LLM extraction                             | Validated JSON, model/prompt metadata, failures pending retry                                |
+| Matching                                   | One pass/fail decision from filters, relevance and attribute constraints                     |
+| Discord alerts                             | Single-tier embed: source, price, condition, matched criteria, pickup area, warnings         |
+| Review/dismiss                             | Owner-bound Reviewed/Save/Dismiss/Not relevant buttons and slash commands                    |
+| Failure visibility                         | Structured events and pending/delivery status records                                        |
+| No transactions                            | No offer, bid, checkout or payment integration                                               |
 
-An alert may be strong only when hard watch filters pass, comparable count is adequate, discount/profit thresholds pass, extraction confidence meets the watch minimum, comparable spread is not excessive, and no extraction/risk warnings remain. Possible matches use a separate opt-in channel. Missing pricing evidence stays silent. Auction prices are always labeled provisional.
+Auctions and Buy It Now are both watched when the watch's `buying` filter allows them; current bids are labeled provisional. Marketplace listings carry verification warnings for deposit, wire-transfer, gift-card, crypto, stock-photo and shipping-only language. These warn; they never block a match or accuse a seller.
 
-Known gaps from the broader PRD are deliberate and documented: no paid sold-data connector chosen, no relist similarity detection, no digest/near-end repeat alert, no automatic rule learning or administrator notifications. Supabase-specific SQL and handler tests complement the local tests. Credential-dependent live acceptance must be checked on the target accounts before declaring production ready.
+Known gaps are deliberate: the Bright Data adapter is a stub until its request/response contract is captured; no relist similarity detection, digest or near-end repeat alerts, automatic rule learning or administrator notifications. Credential-dependent live acceptance must be checked on the target accounts before declaring production ready.
 
 Provider references used for implementation:
 

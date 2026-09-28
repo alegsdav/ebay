@@ -3,74 +3,143 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { PGlite } from "@electric-sql/pglite";
 import {
-  manualDraft,
-  evaluateManual,
-  redact,
-  marketplaceIdentity,
-} from "../src/connectors/manual.js";
-import {
   assertSourceAccess,
-  validateScheduledWatch,
+  scheduledSources,
 } from "../src/connectors/source.js";
 import {
-  watch,
-  normalized,
-  comparableFixtures,
-  parsed,
-} from "../src/fixtures.js";
-import { Comparable, Listing } from "../src/config/schema.js";
-import { evaluate } from "../src/pricing/score.js";
-import { Store } from "../src/database/store.js";
-import { resolveWatch } from "../src/config/categories.js";
+  BrightDataSource,
+  NotImplementedError,
+  marketplaceIdentity,
+  marketplaceListing,
+} from "../src/connectors/brightdata.js";
+import { redact } from "../src/privacy.js";
+import { watch } from "../src/fixtures.js";
+import { Listing, WatchConfig } from "../src/config/schema.js";
 import { getEnv } from "../src/config/env.js";
-import { CloudCommands } from "../src/cloud/commands.js";
-import { CloudStore } from "../src/cloud/store.js";
-import { DiscordHttp } from "../src/cloud/discord.js";
-import { cloudConfig } from "../src/cloud/config.js";
-const input = {
-  source: "facebook",
-  url: "https://www.facebook.com/marketplace/item/123/?tracking=private",
-  title: "Acme Feather 2",
-  price: 50,
-  condition: "open_box",
-  location: "Santa Cruz, CA",
-  travel: 10,
-};
-const llm = {
-  model: "test",
-  parseWatch: async () => parsed,
-  normalize: async () => normalized,
+
+const area = { label: "Santa Cruz, CA", postalCode: null, radiusMiles: 25 };
+const both: WatchConfig = {
+  ...watch,
+  sources: ["ebay", "facebook_marketplace"],
+  location: area,
+  deliveryModes: ["pickup"],
+  intervalMinutes: 1440,
 };
 
-test("manual listing canonicalizes identity, redacts evidence and never fetches Facebook", async (t) => {
+test("source access fails closed; only reviewed providers can be enabled", () => {
+  assertSourceAccess("ebay", "ebay", "authorized_api", true);
+  assertSourceAccess(
+    "facebook_marketplace",
+    "brightdata",
+    "licensed_provider",
+    true,
+  );
+  assert.throws(() =>
+    assertSourceAccess(
+      "facebook_marketplace",
+      "brightdata",
+      "licensed_provider",
+      false,
+    ),
+  );
+  for (const [provider, mode] of [
+    ["manual", "user_submitted"],
+    ["unreviewed", "licensed_provider"],
+    ["brightdata", "scrape"],
+    ["brightdata", "authorized_api"],
+  ])
+    assert.throws(() =>
+      assertSourceAccess("facebook_marketplace", provider!, mode!, true),
+    );
+  assert.throws(() =>
+    assertSourceAccess("ebay", "ebay", "authorized_api", false),
+  );
+});
+
+test("disabled or incomplete Marketplace legs are skipped per watch, not the whole watch", () => {
+  assert.deepEqual(scheduledSources(both, { facebook: false }), {
+    scan: ["ebay"],
+    skipped: [
+      {
+        source: "facebook_marketplace",
+        reason: "facebook_monitoring_disabled",
+      },
+    ],
+  });
+  assert.deepEqual(scheduledSources(both, { facebook: true }).scan, [
+    "ebay",
+    "facebook_marketplace",
+  ]);
+  assert.deepEqual(
+    scheduledSources({ ...both, location: null }, { facebook: true }).skipped,
+    [{ source: "facebook_marketplace", reason: "missing_location" }],
+  );
+  assert.deepEqual(
+    scheduledSources(
+      { ...both, sources: ["facebook_marketplace"] },
+      { facebook: false },
+    ).scan,
+    [],
+  );
+  assert.deepEqual(scheduledSources(watch, { facebook: true }).scan, ["ebay"]);
+});
+
+test("FACEBOOK_MONITORING_ENABLED is a real toggle that defaults off", () => {
+  assert.equal(getEnv({}).FACEBOOK_MONITORING_ENABLED, false);
+  assert.equal(
+    getEnv({ FACEBOOK_MONITORING_ENABLED: "true" }).FACEBOOK_MONITORING_ENABLED,
+    true,
+  );
+  assert.throws(() => getEnv({ FACEBOOK_MONITORING_ENABLED: "yes" }));
+  assert.equal(getEnv({}).BRIGHT_DATA_API_KEY, "");
+});
+
+test("Bright Data stub fails cleanly without any network request", async (t) => {
   t.mock.method(globalThis, "fetch", () => {
     throw new Error("No network permitted");
   });
-  const draft = await manualDraft(
-    {
-      ...input,
-      notes:
-        "Call 831-555-1234 or seller@example.com at 123 West Main Street, Santa Cruz",
-    },
-    watch,
+  const off = new BrightDataSource(getEnv({}));
+  await assert.rejects(async () => {
+    for await (const _ of off.search(both));
+  }, /disabled/);
+  const on = new BrightDataSource(
+    getEnv({ FACEBOOK_MONITORING_ENABLED: "true" }),
   );
-  assert.equal(draft.listing.id, "facebook_marketplace:manual:123");
-  assert.equal(
-    draft.listing.url,
-    "https://www.facebook.com/marketplace/item/123/",
+  await assert.rejects(async () => {
+    for await (const _ of on.search(both));
+  }, NotImplementedError);
+  await assert.rejects(async () => {
+    for await (const _ of on.search({ ...both, location: null }));
+  }, /city/);
+  await assert.rejects(async () => {
+    for await (const _ of on.search(watch));
+  }, /does not include/);
+  await assert.rejects(
+    on.detail({} as Listing),
+    /Bright Data connector not yet implemented/,
   );
-  assert.doesNotMatch(
-    JSON.stringify(draft),
-    /831-555-1234|seller@example|123 West Main|tracking/,
-  );
-  assert.equal(draft.listing.provenance!.evidenceHash.length, 64);
-  const result = await evaluateManual(draft, llm, comparableFixtures());
-  assert.match(result.content!, /Tier 2/);
-  assert.ok(result.files?.[0]?.content.includes("promptVersion"));
-  assert.equal(result.components!.length, 0);
 });
 
-test("manual input rejects unsafe URLs, precise location, malformed prices and source mismatch", async () => {
+test("Marketplace records get canonical identity, redacted text and provenance", async () => {
+  const l = await marketplaceListing({
+    url: "https://m.facebook.com/marketplace/item/123/?tracking=private",
+    title: "Acme Feather 2 — text 831-555-1234",
+    description:
+      "Email seller@example.com, pickup at 123 West Main Street, Santa Cruz",
+    price: 50,
+    locationLabel: "Santa Cruz, CA",
+  });
+  assert.equal(l.id, "facebook_marketplace:brightdata:123");
+  assert.equal(l.url, "https://www.facebook.com/marketplace/item/123/");
+  assert.doesNotMatch(
+    JSON.stringify(l),
+    /831-555-1234|seller@example|123 West Main|tracking/,
+  );
+  assert.equal(l.provenance!.evidenceHash.length, 64);
+  assert.equal(l.provenance!.accessMode, "licensed_provider");
+  assert.equal(l.sellerPercent, null);
+  assert.equal(l.condition, "unknown");
+  assert.equal(Listing.safeParse({ ...l, source: "ebay" }).success, false);
   for (const url of [
     "https://evil.facebook.com/marketplace/item/1",
     "https://facebook.com.evil.org/marketplace/item/1",
@@ -80,249 +149,150 @@ test("manual input rejects unsafe URLs, precise location, malformed prices and s
     "https://facebook.com:444/marketplace/item/1",
   ])
     assert.throws(() => marketplaceIdentity(url));
-  for (const change of [
-    { price: -1 },
-    { price: NaN },
-    { location: "123 West Main Street" },
-    { location: "36.9741, -122.0308" },
-  ])
-    await assert.rejects(manualDraft({ ...input, ...change }, watch));
-  const draft = await manualDraft(input, watch);
-  assert.equal(
-    Listing.safeParse({ ...draft.listing, source: "ebay" }).success,
-    false,
+  await assert.rejects(
+    marketplaceListing({
+      url: "https://www.facebook.com/marketplace/item/1/",
+      title: "x",
+      price: -1,
+    }),
   );
   assert.match(redact("a@b.com 8315551234"), /removed/);
 });
 
-test("pickup arithmetic accounts for travel without inflating tax or inventing seller evidence", async () => {
-  const { listing } = await manualDraft(input, watch);
-  const result = evaluate(listing, normalized, watch, comparableFixtures());
-  assert.equal(result.tier, "possible");
-  assert.equal(result.metrics!.allIn, 69.1); // $50 + $4 tax + $10 travel + $5.10 reserve
-  assert.equal(result.metrics!.profit, 10.3);
-  assert.equal(result.metrics!.travelCost, 10);
-  assert.equal(result.metrics!.maxBid, 59.54);
-  assert.equal(listing.sellerPercent, null);
-  const expensive = {
-    ...listing,
-    provenance: { ...listing.provenance!, travelCost: 100 },
-  };
-  assert.equal(
-    evaluate(expensive, normalized, watch, comparableFixtures()).tier,
-    "silent",
-  );
-});
-
-test("missing condition or sold evidence stays Tier 3; asking prices cannot be imported", async () => {
-  const draft = await manualDraft(input, watch);
-  const message = await evaluateManual(draft, llm, []);
-  assert.match(message.content!, /Tier 3/);
-  assert.match(message.embeds![0].title, /INSUFFICIENT/);
-  assert.equal(
-    evaluate(
-      { ...draft.listing, condition: "unknown" },
-      { ...normalized, condition: "unknown" },
-      watch,
-      comparableFixtures(),
-    ).tier,
-    "silent",
-  );
-  const sale = comparableFixtures()[0]!;
-  assert.equal(
-    Comparable.safeParse({ ...sale, source: "facebook_marketplace" }).success,
-    false,
-  );
-  assert.equal(
-    Comparable.safeParse({ ...sale, sourceUrl: input.url }).success,
-    false,
-  );
-  assert.equal(
-    evaluate(
-      draft.listing,
-      normalized,
-      watch,
-      comparableFixtures().map((c) => ({
-        ...c,
-        source: "facebook_marketplace",
-      })),
-    ).metrics,
-    null,
-  );
-});
-
-test("source access and scheduling fail closed; no enabled-provider flag is accepted", () => {
-  assertSourceAccess("ebay", "ebay", "authorized_api", true);
-  assertSourceAccess("facebook_marketplace", "manual", "user_submitted", true);
-  for (const mode of ["scrape", "licensed_provider", "authorized_api"])
-    assert.throws(() =>
-      assertSourceAccess("facebook_marketplace", "unreviewed", mode, true),
-    );
-  assert.throws(() =>
-    assertSourceAccess("ebay", "ebay", "authorized_api", false),
-  );
-  assert.throws(() =>
-    validateScheduledWatch({ ...watch, sources: ["facebook_marketplace"] }),
-  );
-  assert.throws(
-    () =>
-      resolveWatch(
-        { ...parsed, sources: ["facebook_marketplace"] },
-        "Facebook mice",
-        "c",
-        watch.fees,
-      ),
-    /location|city/,
-  );
-  assert.equal(getEnv({}).FACEBOOK_MONITORING_ENABLED, false);
-  assert.throws(() => getEnv({ FACEBOOK_MONITORING_ENABLED: "true" }));
-});
-
-test("local previews enforce owner, guild, expiry and single-use confirmation; results are private", async () => {
-  const db = new Store(":memory:");
-  try {
-    const draft = await manualDraft(input, watch);
-    const id = db.createSubmission("alice", "guild", draft);
-    assert.throws(() => db.consumeSubmission(id, "bob", "guild"));
-    assert.throws(() => db.consumeSubmission(id, "alice", "other"));
-    assert.deepEqual(db.consumeSubmission(id, "alice", "guild"), draft);
-    assert.throws(() => db.consumeSubmission(id, "alice", "guild"));
-    const expired = db.createSubmission("alice", "guild", draft);
-    db.db
-      .prepare("UPDATE manual_submissions SET expires_at=0 WHERE id=?")
-      .run(expired);
-    assert.throws(() => db.consumeSubmission(expired, "alice", "guild"));
-    db.saveEvaluation(id, "alice", "guild", { content: "evidence" });
-    assert.equal(db.manualEvaluation(id, "bob", "guild"), null);
-    assert.equal(db.manualEvaluation(id, "alice", "guild").content, "evidence");
-  } finally {
-    db.close();
-  }
-});
-
-test("cloud evaluation waits for confirmation and verifies ownership before normalization", async () => {
-  let calls = 0;
-  let saved: any;
-  const db = {
-    watch: async (_id: string, owner: string) =>
-      owner === "alice" ? { config: watch } : null,
-    createSubmission: async (
-      _owner: string,
-      _guild: string,
-      _interaction: string,
-      data: unknown,
-    ) => {
-      saved = data;
-      return { id: "preview", data };
-    },
-    rpc: async (_name: string, args: any) => {
-      if (args.p_owner !== "alice" || !saved)
-        throw new Error("Not owned or consumed");
-      const result = saved;
-      saved = null;
-      return result;
-    },
-    comparables: async () => comparableFixtures(),
-    insert: async () => [],
-  } as unknown as CloudStore;
-  const config = cloudConfig({
-    SUPABASE_URL: "https://test.supabase.co",
-    SUPABASE_SERVICE_ROLE_KEY: "x".repeat(40),
-    DISCORD_PUBLIC_KEY: "a".repeat(64),
-    WORKER_SECRET: "w".repeat(64),
-    DISCORD_TOKEN: "fake",
-    DISCORD_APPLICATION_ID: "app",
-    DISCORD_GUILD_ID: "guild",
-  });
-  const commands = new CloudCommands(
-    db,
-    {} as DiscordHttp,
-    {
-      ...llm,
-      normalize: async () => {
-        calls++;
-        return normalized;
-      },
-    },
-    config,
-  );
-  const base = {
-    id: "interaction",
-    application_id: "app",
-    guild_id: "guild",
-    token: "token",
-    member: { user: { id: "alice" } },
-  };
-  const result = await commands.run({
-    ...base,
-    type: 2,
-    data: {
-      name: "listing",
-      options: [
-        {
-          name: "evaluate",
-          type: 1,
-          options: Object.entries({ ...input, watch: "watch" }).map(
-            ([name, value]) => ({ name, value }),
-          ),
-        },
-      ],
-    },
-  });
-  assert.equal(calls, 0);
-  assert.equal(
-    result.components![0].components[0].custom_id,
-    "manual:confirm:preview",
-  );
-  await assert.rejects(
-    commands.run({
-      ...base,
-      member: { user: { id: "bob" } },
-      type: 3,
-      data: { custom_id: "manual:confirm:preview" },
-    }),
-  );
-  await commands.run({
-    ...base,
-    type: 3,
-    data: { custom_id: "manual:confirm:preview" },
-  });
-  assert.equal(calls, 1);
-  await assert.rejects(
-    commands.run({
-      ...base,
-      type: 3,
-      data: { custom_id: "manual:confirm:preview" },
-    }),
-  );
-});
-
-test("new PostgreSQL migration enforces confirmations, zero budgets, kill switch, cleanup and grants", async () => {
+const migrations = [
+  "202609170001_scout.sql",
+  "202609240001_classifieds.sql",
+  "202609240002_preferences.sql",
+  "202609280001_keyword_watch.sql",
+];
+test("keyword-watch migration converts watches, drops pricing tables and keeps grants", async () => {
   const db = new PGlite();
   try {
     await db.exec(
       "create role anon; create role authenticated; create role service_role bypassrls;",
     );
-    for (const file of [
-      "202609170001_scout.sql",
-      "202609240001_classifieds.sql",
-    ])
+    for (const file of migrations.slice(0, 3))
       await db.exec(readFileSync(`supabase/migrations/${file}`, "utf8"));
-    const id = (
+    // A pre-rework eBay deal watch and a Marketplace match watch.
+    const legacy = {
+      name: "Mice",
+      category: "gaming_mice",
+      rawQuery: "mice",
+      searchTerms: "gaming mouse",
+      excludedKeywords: ["broken"],
+      constraints: [],
+      conditions: ["used"],
+      minAllIn: 10,
+      maxAllIn: 85,
+      minDiscountPercent: 20,
+      minProfit: 0,
+      minSellerPercent: 98,
+      country: "US",
+      currency: "USD",
+      minComparables: 5,
+      lookbackDays: 90,
+      minConfidence: 0.85,
+      buying: "fixed",
+      channelId: "c",
+      possibleChannelId: null,
+      intervalMinutes: 60,
+      fees: { taxRate: 0.08 },
+    };
+    const marketplace = {
+      ...legacy,
+      purpose: "match",
+      sources: ["facebook_marketplace"],
+      location: area,
+      deliveryModes: ["pickup"],
+      maxAskingPrice: 20,
+      estimatedTravelCost: 0,
+      intervalMinutes: 1440,
+    };
+    for (const config of [legacy, marketplace])
+      await db.query(
+        "insert into scout_watches(owner_id,guild_id,config) values('alice','g',$1)",
+        [JSON.stringify(config)],
+      );
+    await db.query(
+      "insert into scout_drafts(owner_id,guild_id,config,query) values('alice','g','{}','q')",
+    );
+    await db.exec(
+      "insert into scout_listings(id,data) values('l','{}'); insert into scout_normalized values('l','gaming_mice','h','{}','m','p');",
+    );
+    await db.exec(readFileSync(`supabase/migrations/${migrations[3]}`, "utf8"));
+    const rows = (
+      await db.query<{ config: any; revision: number }>(
+        "select config,revision from scout_watches order by (config->>'intervalMinutes')::int",
+      )
+    ).rows;
+    const [ebay, fb] = rows.map((r) => WatchConfig.parse(r.config));
+    assert.deepEqual(ebay!.sources, ["ebay"]);
+    assert.equal(ebay!.minPrice, 10);
+    assert.equal(ebay!.maxPrice, 85);
+    assert.equal(ebay!.minSellerPercent, 98);
+    assert.deepEqual(fb!.sources, ["facebook_marketplace"]);
+    assert.equal(fb!.maxPrice, 20);
+    assert.deepEqual(fb!.location, area);
+    assert.ok(rows.every((r) => r.revision === 2));
+    assert.equal((await db.query("select * from scout_drafts")).rows.length, 0);
+    for (const table of [
+      "scout_comparables",
+      "scout_submissions",
+      "scout_evaluations",
+    ])
+      await assert.rejects(db.query(`select * from ${table}`));
+    await assert.rejects(
+      db.query("select scout_consume_submission(gen_random_uuid(),'a','g')"),
+    );
+    // Normalization cache is keyed by listing and hash only.
+    await db.exec(
+      "insert into scout_normalized(listing_id,hash,data,model,prompt_version) values('l','h1','{}','m','p'),('l','h2','{}','m','p');",
+    );
+    await assert.rejects(
+      db.exec(
+        "insert into scout_normalized(listing_id,hash,data,model,prompt_version) values('l','h1','{}','m','p')",
+      ),
+    );
+    const watchId = (
+      await db.query<{ id: string }>("select id from scout_watches limit 1")
+    ).rows[0]!.id;
+    const alert = (
       await db.query<{ id: string }>(
-        "insert into scout_submissions(owner_id,guild_id,interaction_id,data) values ('alice','g','i','{\"test\":true}') returning id",
+        "select scout_reserve_alert($1,2,'l','{}') id",
+        [watchId],
       )
     ).rows[0]!.id;
-    await assert.rejects(
-      db.query("select scout_consume_submission($1,'bob','g')", [id]),
+    await db.query(
+      "insert into scout_feedback(alert_id,user_id,action) values($1,'alice','not_relevant')",
+      [alert],
     );
-    await db.query("select scout_consume_submission($1,'alice','g')", [id]);
     await assert.rejects(
-      db.query("select scout_consume_submission($1,'alice','g')", [id]),
+      db.query(
+        "insert into scout_feedback(alert_id,user_id,action) values($1,'bob','bogus')",
+        [alert],
+      ),
     );
+    // Cleanup keeps only the ingestion-run retention; purge accepts any known source.
+    await db.exec(
+      "insert into scout_ingestion_runs(status,started_at) values('failed',now()-interval '40 days'); select scout_cleanup_classifieds();",
+    );
+    assert.equal(
+      (await db.query("select * from scout_ingestion_runs")).rows.length,
+      0,
+    );
+    await db.exec(
+      "insert into scout_listings(id,data) values('fb','{\"source\":\"facebook_marketplace\"}'); select scout_purge_classifieds('facebook_marketplace');",
+    );
+    assert.equal(
+      (await db.query("select * from scout_listings where id='fb'")).rows
+        .length,
+      0,
+    );
+    await db.exec("select scout_purge_classifieds('ebay');");
+    await assert.rejects(db.query("select scout_purge_classifieds('other')"));
     const config = (
       await db.query<{ id: string }>(
-        "insert into scout_source_configs(source,provider,access_mode) values ('facebook_marketplace','test','licensed_provider') returning id",
+        "insert into scout_source_configs(source,provider,access_mode,enabled,terms_reviewed_at,terms_reference,daily_request_limit,daily_cost_limit) values ('facebook_marketplace','brightdata','licensed_provider',true,now(),'test only',1,1) returning id",
       )
     ).rows[0]!.id;
     const budget = async () =>
@@ -332,30 +302,16 @@ test("new PostgreSQL migration enforces confirmations, zero budgets, kill switch
           [config],
         )
       ).rows[0]!.ok;
-    assert.equal(await budget(), false);
-    await db.query(
-      "update scout_source_configs set enabled=true, terms_reviewed_at=now(), terms_reference='test only', daily_request_limit=2,daily_cost_limit=1 where id=$1",
-      [config],
-    );
     assert.equal(await budget(), true);
     assert.equal(await budget(), false);
-    await db.query(
-      "update scout_source_configs set enabled=false where id=$1",
-      [config],
-    );
-    assert.equal(await budget(), false);
-    await db.exec(
-      "insert into scout_submissions(owner_id,guild_id,interaction_id,data,expires_at) values ('a','g','expired','{}',now()-interval '1 day'); select scout_cleanup_classifieds();",
-    );
-    assert.equal(
-      (await db.query("select * from scout_submissions")).rows.length,
-      0,
-    );
-    await db.exec(
-      "select scout_purge_classifieds('facebook_marketplace'); set role anon;",
-    );
-    await assert.rejects(db.query("select * from scout_submissions"));
-    await assert.rejects(db.query("select scout_cleanup_classifieds()"));
+    for (const role of ["anon", "authenticated"]) {
+      await db.exec(`set role ${role};`);
+      await assert.rejects(db.query("select * from scout_normalized"));
+      await assert.rejects(db.query("select * from scout_feedback"));
+      await assert.rejects(db.query("select scout_cleanup_classifieds()"));
+      await assert.rejects(db.query("select scout_purge_classifieds('ebay')"));
+      await db.exec("reset role;");
+    }
   } finally {
     await db.close();
   }

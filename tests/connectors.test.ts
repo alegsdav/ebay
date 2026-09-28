@@ -7,7 +7,7 @@ import { LlmClient } from "../src/llm/client.js";
 import { Normalized, ParsedWatch } from "../src/config/schema.js";
 import { normalized } from "../src/fixtures.js";
 import { getEnv } from "../src/config/env.js";
-import { formatAlert } from "../src/alerts/format.js";
+import { alertMessage } from "../src/cloud/discord.js";
 import { samplePayload } from "../src/fixtures.js";
 import { commands } from "../src/commands/definitions.js";
 const item = {
@@ -58,13 +58,18 @@ test("rate limiting honors Retry-After without extra calls", async (t) => {
   );
   assert.equal(calls, 1);
 });
-test("structured schemas compile and reject unrecognized pricing fields", () => {
+test("structured schemas compile and reject removed category/pricing fields", () => {
   assert.equal(z.toJSONSchema(Normalized).additionalProperties, false);
   assert.ok(z.toJSONSchema(ParsedWatch));
-  assert.equal(
-    Normalized.safeParse({ ...normalized, salePrice: 999 }).success,
-    false,
-  );
+  for (const extra of [
+    { salePrice: 999 },
+    { category: "gaming_mice" },
+    { comparableSearchTerms: [] },
+  ])
+    assert.equal(
+      Normalized.safeParse({ ...normalized, ...extra }).success,
+      false,
+    );
 });
 test("Gemini structured output is locally validated and malformed/refused responses rejected", async (t) => {
   const env = {
@@ -143,35 +148,66 @@ test("OpenAI Responses structured output and refusals", async (t) => {
   );
   await assert.rejects(llm.structured(Normalized, "test", "extract", {}));
 });
+const embedLength = (e: any) =>
+  (e.title?.length ?? 0) +
+  (e.description?.length ?? 0) +
+  (e.footer?.text.length ?? 0) +
+  e.fields.reduce(
+    (sum: number, f: any) => sum + f.name.length + f.value.length,
+    0,
+  );
 test("Discord payload and slash definitions serialize within platform limits", () => {
-  const result = formatAlert(samplePayload(), "sample-id");
-  const embed = result.embeds[0]!.toJSON();
-  assert.ok(embed.fields!.length <= 25);
+  const result = alertMessage(samplePayload(), "sample-id");
+  const embed = result.embeds![0];
+  assert.ok(embed.fields.length <= 25);
   assert.ok(JSON.stringify(embed).length < 6000);
-  assert.equal(result.components[0]!.toJSON().components.length, 5);
-  assert.deepEqual(result.allowedMentions.parse, []);
+  assert.equal(result.components![0].components.length, 5);
   assert.ok(commands.some((c) => c.name === "watch"));
-  assert.ok(commands.some((c) => c.name === "settings"));
+  const watch: any = commands.find((c) => c.name === "watch");
+  for (const sub of ["create", "update"])
+    assert.deepEqual(
+      watch.options
+        .find((o: any) => o.name === sub)
+        .options.find((o: any) => o.name === "sources")
+        .choices.map((c: any) => c.value),
+      ["both", "ebay_only", "facebook_only"],
+    );
+  const listing: any = commands.find((c) => c.name === "listing");
+  assert.ok(!listing.options.some((o: any) => o.name === "evaluate"));
+  const settings: any = commands.find((c) => c.name === "settings");
+  assert.deepEqual(
+    settings.options.map((o: any) => o.name),
+    [
+      "id",
+      "min_price",
+      "max_price",
+      "clear_price_limits",
+      "frequency",
+      "channel",
+    ],
+  );
+  for (const c of commands as any[]) {
+    assert.ok(c.description.length <= 100);
+    for (const o of c.options ?? []) {
+      assert.ok(o.description.length <= 100);
+      for (const p of o.options ?? []) assert.ok(p.description.length <= 100);
+    }
+  }
 });
 
-test("oversized evidence and warnings stay within Discord embed limits", () => {
+test("oversized text, warnings and attributes stay within Discord embed limits", () => {
   const payload = samplePayload();
-  payload.evaluation.comparables = payload.evaluation.comparables.map((c) => ({
-    ...c,
-    sourceUrl: "https://example.com/" + "a".repeat(1900),
-  }));
-  payload.evaluation.warnings = Array(15).fill("W".repeat(200));
-  payload.evaluation.reasons = Array(3).fill("R".repeat(500));
-  payload.normalized.attributes = Array(40).fill({
-    key: "long-key",
+  payload.listing.title = "T".repeat(500);
+  payload.listing.sellerName = "S".repeat(200);
+  payload.match.warnings = Array(15).fill("W".repeat(200));
+  payload.normalized.explanation = "E".repeat(500);
+  payload.normalized.attributes = Array.from({ length: 40 }, (_, i) => ({
+    key: i ? `key_${i}` : "connectivity",
     value: "V".repeat(200),
-  });
-  const e = formatAlert(payload, "sample").embeds[0]!.toJSON();
-  assert.ok(e.fields!.every((f) => f.value.length <= 1024));
-  const length =
-    (e.title?.length ?? 0) +
-    (e.description?.length ?? 0) +
-    (e.footer?.text.length ?? 0) +
-    e.fields!.reduce((sum, f) => sum + f.name.length + f.value.length, 0);
-  assert.ok(length <= 6000);
+  }));
+  payload.config.constraints = [];
+  const e = alertMessage(payload, "sample").embeds![0];
+  assert.ok(e.fields.every((f: any) => f.value.length <= 1024));
+  assert.ok(e.title.length <= 256);
+  assert.ok(embedLength(e) <= 6000);
 });

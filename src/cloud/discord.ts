@@ -1,8 +1,7 @@
 import { HttpError } from "../connectors/http.js";
-import type { CloudWatch } from "./store.js";
-import type { WatchConfig } from "../config/schema.js";
-import type { Evaluation } from "../pricing/score.js";
-import type { Listing, Normalized } from "../config/schema.js";
+import type { Listing, Normalized, WatchConfig } from "../config/schema.js";
+import type { MatchResult } from "../filters/evaluate.js";
+import { sourceLabel } from "../config/preferences.js";
 export interface Interaction {
   id: string;
   application_id: string;
@@ -169,40 +168,54 @@ export class DiscordHttp {
     });
   }
 }
+const priceRange = (w: WatchConfig) =>
+  w.minPrice === null && w.maxPrice === null
+    ? "any price"
+    : w.minPrice === null
+      ? `up to ${money(w.maxPrice!)}`
+      : w.maxPrice === null
+        ? `${money(w.minPrice)} or more`
+        : `${money(w.minPrice)}–${money(w.maxPrice)}`;
 export function preview(
   config: WatchConfig,
   id: string,
   notes: string[] = [],
+  facebookEnabled = false,
 ): Message {
+  const marketplace = config.sources.includes("facebook_marketplace");
   return {
     content:
       [
         `**Review ${clean(config.name)}**`,
-        `${clean(config.searchTerms)} · ${config.category} · US/USD`,
-        `Conditions: ${config.conditions.join(", ")} · ${config.buying}`,
-        `All-in budget: ${config.minAllIn ?? 0}–${config.maxAllIn ?? "no maximum"} USD`,
-        ...(config.purpose === "match"
-          ? [
-              `Facebook Marketplace · asking price ≤ $${config.maxAskingPrice ?? "unlimited"}`,
-              `Area: ${clean(config.location?.label ?? "unset")} · ${config.location?.radiusMiles} miles · ${config.deliveryModes?.join(" / ")}`,
-              "Match-only watch: no sold prices, profit target, or resale analysis.",
-              "Pending Bright Data connection — automatic discovery is NOT running.",
-            ]
-          : [
-              `Minimum discount ${config.minDiscountPercent}% · profit ${money(config.minProfit)} · ${config.minComparables} verified sales`,
-            ]),
+        `Keywords: ${clean(config.searchTerms)} · US/USD`,
+        `Sources: ${config.sources.map(sourceLabel).join(" + ")}`,
+        `Price: ${priceRange(config)} · conditions ${config.conditions.join(", ")} · ${config.buying}`,
+        `Excluding: ${clean(config.excludedKeywords.join(", ") || "none")}`,
         `Criteria: ${clean(config.constraints.map((c) => `${c.key} ${c.operator} ${c.value}`).join("; ") || "none")}`,
+        ...(config.minSellerPercent !== null
+          ? [`eBay seller rating ≥ ${config.minSellerPercent}%`]
+          : []),
+        ...(marketplace
+          ? [
+              `Marketplace area: ${clean(config.location?.label ?? "unset")} · ${config.location?.radiusMiles} miles · ${config.deliveryModes?.join(" / ")}`,
+              ...(facebookEnabled
+                ? []
+                : [
+                    "Facebook Marketplace discovery is not connected yet; that leg is skipped until it is.",
+                  ]),
+            ]
+          : []),
         ...notes
           .filter((n) => n.startsWith("Confirm recommendation:"))
           .map((n) => clean(n)),
-        `Every ${config.intervalMinutes} minutes · <#${config.channelId}>`,
+        `Every ${config.intervalMinutes} minutes · alerts in <#${config.channelId}>`,
         ...notes
           .filter((n) => !n.startsWith("Confirm recommendation:"))
           .map((n) => clean(n)),
       ]
         .join("\n")
         .slice(0, 1600) +
-      "\nRead the attached complete rules and fee assumptions. Confirm to save, or edit your query. Expires in 15 minutes.",
+      "\nMatching listings are posted once each; no price analysis. Read the attached rules. Confirm to save, or edit your query. Expires in 15 minutes.",
     files: [
       { name: "watch-preview.json", content: JSON.stringify(config, null, 2) },
     ],
@@ -236,104 +249,93 @@ export function preview(
 export interface CloudAlert {
   listing: Listing;
   normalized: Normalized;
-  evaluation: Evaluation;
+  match: MatchResult;
   config: WatchConfig;
 }
+export const feedbackActions = {
+  reviewed: "Reviewed",
+  saved: "Save",
+  dismissed: "Dismiss",
+  not_relevant: "Not relevant",
+} as const;
 export function alertMessage(p: CloudAlert, id: string): Message {
-  const { listing: l, normalized: n, evaluation: e } = p,
-    m = e.metrics;
-  if (!m) throw new Error("Missing pricing evidence");
-  const evidence: string[] = [];
-  for (const [i, c] of e.comparables.slice(0, 5).entries()) {
-    const line = `[Sale ${i + 1}](<${new URL(c.sourceUrl).href}>) · ${money(c.salePrice + c.shipping)}`;
-    if ([...evidence, line].join("\n").length > 800) break;
-    evidence.push(line);
-  }
+  const { listing: l, normalized: n, match: m, config: w } = p;
+  const marketplace = l.source === "facebook_marketplace";
+  const keys = new Set(w.constraints.map((c) => c.key));
+  const shown = keys.size
+    ? n.attributes.filter((a) => keys.has(a.key))
+    : n.attributes;
+  const shipping =
+    l.shipping === null
+      ? marketplace
+        ? ""
+        : " · shipping unknown"
+      : l.shipping === 0
+        ? " · free shipping"
+        : ` + ${money(l.shipping)} shipping`;
   return {
     embeds: [
       {
-        title: `${e.tier === "strong" ? "POTENTIAL DEAL" : "POSSIBLE MATCH"} · ${clean(l.title).slice(0, 200)}`,
+        title: `MATCH · ${clean(l.title).slice(0, 200)}`,
         url: l.url,
-        color: e.tier === "strong" ? 0x27ae60 : 0xe6a23c,
-        description: clean(e.reasons.join("\n")).slice(0, 700),
+        color: marketplace ? 0x1877f2 : 0xe53238,
+        description: clean(n.explanation).slice(0, 700) || undefined,
         fields: [
-          ...(l.source === "facebook_marketplace"
+          { name: "Source", value: sourceLabel(l.source), inline: true },
+          {
+            name: l.auction ? "Current bid — provisional" : "Price",
+            value: `${money(l.price)}${shipping}`,
+            inline: true,
+          },
+          {
+            name: "Condition",
+            value: l.condition === "unknown" ? n.condition : l.condition,
+            inline: true,
+          },
+          {
+            name: keys.size ? "Matched criteria" : "Details",
+            value:
+              clean(shown.map((a) => `${a.key}: ${a.value}`).join(" · ")).slice(
+                0,
+                900,
+              ) || "None extracted",
+          },
+          ...(marketplace
             ? [
                 {
-                  name: "Source / pickup",
-                  value: `User-submitted Marketplace listing · manual · ${clean(l.provenance?.locationLabel ?? "unknown").slice(0, 200)} · travel ${money(m.travelCost ?? 0)}\nAsking price only; Tier 2 maximum. Verify in person.`,
+                  name: "Location / pickup",
+                  value: `${clean(l.provenance?.locationLabel ?? "unknown").slice(0, 200)} · ${l.provenance?.deliveryModes.join(" / ") ?? "pickup"}${w.estimatedTravelCost > 0 ? ` · your travel estimate ${money(w.estimatedTravelCost)}` : ""}`,
+                },
+              ]
+            : [
+                {
+                  name: "Seller",
+                  value: `${clean(l.sellerName).slice(0, 100)} · ${l.sellerPercent ?? "unknown"}% positive · ${l.sellerFeedback ?? "unknown"} feedback`,
+                },
+              ]),
+          ...(l.auction
+            ? [
+                {
+                  name: "Ends",
+                  value: l.endTime
+                    ? `<t:${Math.floor(Date.parse(l.endTime) / 1000)}:R>`
+                    : "End time not provided",
+                  inline: true,
                 },
               ]
             : []),
           {
-            name: l.auction ? "Current bid — provisional" : "Asking price",
-            value: money(m.purchase),
-            inline: true,
-          },
-          {
-            name: "Inbound shipping",
-            value: money(m.inboundShipping),
-            inline: true,
-          },
-          { name: "Estimated all-in", value: money(m.allIn), inline: true },
-          {
-            name: "Acquisition costs",
-            value: `Buyer fees ${money(m.buyerFees)} · estimated tax ${money(m.taxes)}${l.source === "facebook_marketplace" ? ` · travel ${money(m.travelCost ?? 0)} · risk reserve ${money(m.riskReserve)}` : ""}`,
-          },
-          {
-            name: "Delivered-sale comparables",
-            value: `Median ${money(m.median)} · range ${money(m.low)}–${money(m.high)}\n${m.count} verified sales · ${m.oldest.slice(0, 10)} to ${m.newest.slice(0, 10)}`,
-          },
-          {
-            name: "Resale costs",
-            value: `Selling fees ${money(m.sellingFees)} · outbound shipping ${money(m.outboundShipping)}${l.source === "ebay" ? ` · risk reserve ${money(m.riskReserve)}` : ""}`,
-          },
-          {
-            name: "Net resale / estimated profit",
-            value: `${money(m.netResale)} / ${money(m.profit)}`,
-          },
-          {
-            name: "Discount / score",
-            value: `${m.discountPercent}% / ${m.score}/100`,
-            inline: true,
-          },
-          {
-            name: "Modeled maximum purchase / bid",
-            value: money(m.maxBid),
-            inline: true,
-          },
-          {
-            name: "Extraction confidence / condition",
-            value: `${Math.round(n.confidence * 100)}% / ${n.condition}`,
-            inline: true,
-          },
-          {
-            name: "Identity / grade",
-            value:
-              clean(
-                n.attributes.map((a) => `${a.key}: ${a.value}`).join(" · "),
-              ).slice(0, 900) || "Unknown",
-          },
-          {
-            name: "Seller / end time",
-            value: `${clean(l.sellerName).slice(0, 100)} · ${l.sellerPercent ?? "unknown"}% · ${l.sellerFeedback ?? "unknown"} feedback\n${l.endTime ?? "End time not provided"}`,
-          },
-          {
-            name: "Sale evidence",
-            value: evidence.join("\n") || "Full links: /listing details",
-          },
-          {
             name: "Warnings",
             value: clean(
               [
-                ...e.warnings,
-                "Inspect original listing and photos. Authenticity is unverified.",
+                ...m.warnings,
+                "Check the original listing and photos. Details are extracted from listing text and may be wrong.",
               ].join("\n"),
             ).slice(0, 900),
           },
         ],
         footer: {
-          text: `Estimates are informational only. Verify authenticity, condition, fees, shipping, and comparable sales before bidding. Alert ${id}`,
+          text: `Watch: ${w.name.replace(/[@<>]/g, "").slice(0, 80)} · Alert ${id}`,
         },
       },
     ],
@@ -342,14 +344,12 @@ export function alertMessage(p: CloudAlert, id: string): Message {
         type: 1,
         components: [
           { type: 2, style: 5, label: "Open listing", url: l.url },
-          ...["reviewed", "saved", "dismissed", "incorrect_match"].map(
-            (a, i) => ({
-              type: 2,
-              style: 2,
-              label: ["Reviewed", "Save", "Dismiss", "Not a match"][i],
-              custom_id: `feedback:${a}:${id}`,
-            }),
-          ),
+          ...Object.entries(feedbackActions).map(([action, label]) => ({
+            type: 2,
+            style: 2,
+            label,
+            custom_id: `feedback:${action}:${id}`,
+          })),
         ],
       },
     ],

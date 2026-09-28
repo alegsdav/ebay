@@ -9,17 +9,17 @@ import {
 } from "./discord.js";
 import { LlmClient, PROMPT_VERSION } from "../llm/client.js";
 import { EbaySource } from "../connectors/ebay.js";
-import { Listing } from "../config/schema.js";
+import { BrightDataSource } from "../connectors/brightdata.js";
+import { Listing, type WatchConfig } from "../config/schema.js";
 import { basicReject } from "../filters/matches.js";
-import { evaluate } from "../pricing/score.js";
+import { evaluateMatch, minExtractionConfidence } from "../filters/evaluate.js";
 import { HttpError } from "../connectors/http.js";
 import { log, errorKind } from "../logging.js";
 import {
-  redact,
-  ManualInput,
-  marketplaceIdentity,
-} from "../connectors/manual.js";
-import { validateScheduledWatch } from "../connectors/source.js";
+  scheduledSources,
+  type ListingSourceConnector,
+  type SourceId,
+} from "../connectors/source.js";
 const json = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), {
     status,
@@ -125,28 +125,6 @@ export function interactionsHandler(
           type: 4,
           data: { content: "Unsupported interaction.", flags: 64 },
         });
-      if (
-        i.data?.name === "listing" &&
-        i.data.options?.[0]?.name === "evaluate"
-      ) {
-        ManualInput.parse(
-          Object.fromEntries(
-            (i.data.options[0].options ?? [])
-              .filter((o: any) => o.name !== "watch")
-              .map((o: any) => [o.name, o.value]),
-          ),
-        );
-        for (const option of i.data.options[0].options ?? []) {
-          if (
-            ["title", "notes", "location"].includes(option.name) &&
-            typeof option.value === "string"
-          )
-            option.value = redact(option.value);
-          if (option.name === "url" && typeof option.value === "string") {
-            option.value = marketplaceIdentity(option.value).url;
-          }
-        }
-      }
       await db.enqueue([
         { dedupe_key: `interaction:${i.id}`, kind: "interaction", payload: i },
       ]);
@@ -241,28 +219,48 @@ export async function processJob(
   if (!c.CLOUD_MONITORING_ENABLED) return;
   const w = await db.watch(job.payload.watchId);
   if (!w || !w.active || w.revision !== job.payload.revision) return;
-  validateScheduledWatch(w.config);
-  const source = new EbaySource(
-    { ...c.env, MAX_PAGES_PER_WATCH: 1 },
-    () => db.budget("ebay", c.env.EBAY_MAX_CALLS_PER_DAY),
-    signal,
-  );
+  const connectors = sourceConnectors(w.config, c, db, signal);
   if (job.kind === "scan") {
     const candidates = new Map<string, Listing>();
-    for await (const l of source.search(w.config)) {
-      if (!basicReject(l, w.config)) candidates.set(l.id, l);
-      if (candidates.size >= c.CLOUD_ITEMS_PER_WATCH) break;
+    const failures: unknown[] = [];
+    // Each source is scanned independently: one failing or disabled leg never
+    // blocks the others, and a retry re-runs only when every leg failed.
+    for (const [source, connector] of connectors) {
+      let found = 0;
+      try {
+        for await (const l of connector.search(w.config)) {
+          if (!basicReject(l, w.config) && !candidates.has(l.id)) {
+            candidates.set(l.id, l);
+            found++;
+          }
+          if (found >= c.CLOUD_ITEMS_PER_WATCH) break;
+        }
+      } catch (error) {
+        failures.push(error);
+        if (error instanceof HttpError && error.status === 429)
+          await db.cooldown(error.service, error.retryAt).catch(() => {});
+        log("cloud_source_failure", {
+          watchId: w.id,
+          source,
+          error: errorKind(error),
+        });
+      }
     }
+    if (connectors.size && failures.length === connectors.size)
+      throw failures[0];
     const old = await db.rows("scout_processing", {
       watch_id: `eq.${w.id}`,
-      status: "in.(silent,possible,needs_processing)",
+      status: "eq.needs_processing",
       order: "updated_at.asc",
       limit: "10",
       select: "listing_id,scout_listings(data)",
     });
     for (const row of old) {
       const l = Listing.parse(row.scout_listings.data);
-      if (!l.endTime || Date.parse(l.endTime) > Date.now())
+      if (
+        connectors.has(l.source) &&
+        (!l.endTime || Date.parse(l.endTime) > Date.now())
+      )
         candidates.set(l.id, l);
     }
     await db.enqueue(
@@ -274,16 +272,26 @@ export async function processJob(
     );
     log("cloud_scan_enqueued", {
       watchId: w.id,
+      sources: [...connectors.keys()],
       candidates: candidates.size,
       cap: c.CLOUD_ITEMS_PER_WATCH,
     });
     return;
   }
   let listing = Listing.parse(job.payload.listing);
+  const source = connectors.get(listing.source);
+  if (!source) {
+    log("cloud_listing_skipped", {
+      watchId: w.id,
+      source: listing.source,
+      reason: "source_not_scanned",
+    });
+    return;
+  }
   await db.saveListing(listing);
   try {
-    // All queued candidates are refreshed; never alert using the queued price snapshot.
-    listing = await source.detail(listing);
+    // All queued candidates are refreshed; never alert using the queued snapshot.
+    if (source.detail) listing = await source.detail(listing);
     await db.saveListing(listing);
     const reject = basicReject(listing, w.config);
     if (reject) {
@@ -296,57 +304,48 @@ export async function processJob(
       description: listing.description,
       specifics: listing.specifics,
       condition: listing.condition,
+      // Relevance and extracted keys depend on what the watch searches for.
+      intent: {
+        searchTerms: w.config.searchTerms,
+        keys: [...new Set(w.config.constraints.map((k) => k.key))].sort(),
+      },
       model: model.model,
       prompt: PROMPT_VERSION,
     });
-    let n = await db.normalized(listing.id, w.config.category, hash);
+    let n = await db.normalized(listing.id, hash);
     if (!n) {
       n = await model.normalize(listing, w.config);
-      if (n.confidence >= 0.65)
+      if (n.confidence >= minExtractionConfidence)
         await db.upsert(
           "scout_normalized",
           {
             listing_id: listing.id,
-            category: w.config.category,
             hash,
             data: n,
             model: model.model,
             prompt_version: PROMPT_VERSION,
             created_at: new Date().toISOString(),
           },
-          "listing_id,category",
+          "listing_id,hash",
         );
     }
-    const result = evaluate(
-      listing,
-      n,
-      w.config,
-      await db.comparables(w.config.category, w.config.lookbackDays),
-    );
-    // Full comparable evidence belongs only in emitted alerts, avoiding repeated large DB snapshots.
-    await db.process(w.id, listing.id, result.tier, {
-      reasons: result.reasons,
-      warnings: result.warnings,
-      metrics: result.metrics,
+    const match = evaluateMatch(listing, n, w.config);
+    if (!match.matched) {
+      await db.process(w.id, listing.id, "rejected", {
+        reason: match.reason,
+        warnings: match.warnings,
+      });
+      return;
+    }
+    await db.process(w.id, listing.id, "matched", {
+      warnings: match.warnings,
     });
-    const channel =
-      result.tier === "strong"
-        ? w.config.channelId
-        : result.tier === "possible"
-          ? w.config.possibleChannelId
-          : null;
-    if (!channel) return;
-    const payload = {
-      listing,
-      normalized: n,
-      evaluation: result,
-      config: w.config,
-    };
+    const payload = { listing, normalized: n, match, config: w.config };
     if (c.env.DRY_RUN) {
       log("cloud_dry_run_alert", {
         watchId: w.id,
         listingId: listing.id,
-        metrics: result.metrics,
+        source: listing.source,
       });
       return;
     }
@@ -359,7 +358,7 @@ export async function processJob(
     if (!id) return;
     try {
       const message = await discord.send(
-        channel,
+        w.config.channelId,
         alertMessage(payload, id),
         id,
       );
@@ -387,6 +386,35 @@ export async function processJob(
     );
     throw error;
   }
+}
+// Connectors for the sources this watch scans now; disabled legs are logged and skipped.
+function sourceConnectors(
+  w: WatchConfig,
+  c: CloudConfig,
+  db: CloudStore,
+  signal: AbortSignal,
+) {
+  const plan = scheduledSources(w, {
+    facebook: c.env.FACEBOOK_MONITORING_ENABLED,
+  });
+  for (const skip of plan.skipped) log("cloud_source_skipped", skip);
+  const connectors = new Map<SourceId, ListingSourceConnector>();
+  for (const source of plan.scan)
+    connectors.set(
+      source,
+      source === "ebay"
+        ? new EbaySource(
+            { ...c.env, MAX_PAGES_PER_WATCH: 1 },
+            () => db.budget("ebay", c.env.EBAY_MAX_CALLS_PER_DAY),
+            signal,
+          )
+        : new BrightDataSource(
+            c.env,
+            () => db.budget("brightdata", c.env.BRIGHT_DATA_MAX_CALLS_PER_DAY),
+            signal,
+          ),
+    );
+  return connectors;
 }
 export function workerHandler(c: CloudConfig) {
   return async (req: Request): Promise<Response> => {

@@ -1,4 +1,20 @@
-import { SlashCommandBuilder, ChannelType } from "discord.js";
+import {
+  SlashCommandBuilder,
+  ChannelType,
+  type SlashCommandSubcommandBuilder,
+} from "discord.js";
+// Values match sourceChoices in src/config/preferences.ts.
+const sources = (s: SlashCommandSubcommandBuilder) =>
+  s.addStringOption((o) =>
+    o
+      .setName("sources")
+      .setDescription("Where to search (default: both)")
+      .addChoices(
+        { name: "eBay + Facebook Marketplace", value: "both" },
+        { name: "eBay only", value: "ebay_only" },
+        { name: "Facebook Marketplace only", value: "facebook_only" },
+      ),
+  );
 export const commands = [
   new SlashCommandBuilder()
     .setName("defaults")
@@ -38,43 +54,47 @@ export const commands = [
     ),
   new SlashCommandBuilder()
     .setName("watch")
-    .setDescription("Create and manage your deal watches")
+    .setDescription("Create and manage your keyword watches")
     .setDMPermission(false)
     .addSubcommand((s) =>
-      s
-        .setName("create")
-        .setDescription("Preview a natural-language watch")
-        .addStringOption((o) =>
-          o
-            .setName("query")
-            .setDescription("e.g. wireless gaming mice under $80")
-            .setRequired(true)
-            .setMaxLength(2000),
-        )
-        .addChannelOption((o) =>
-          o
-            .setName("channel")
-            .setDescription("Alert destination (default: here)")
-            .addChannelTypes(ChannelType.GuildText),
-        ),
+      sources(
+        s
+          .setName("create")
+          .setDescription("Preview a natural-language keyword watch")
+          .addStringOption((o) =>
+            o
+              .setName("query")
+              .setDescription("e.g. wireless gaming mice under $80")
+              .setRequired(true)
+              .setMaxLength(2000),
+          )
+          .addChannelOption((o) =>
+            o
+              .setName("channel")
+              .setDescription("Alert destination (default: here)")
+              .addChannelTypes(ChannelType.GuildText),
+          ),
+      ),
     )
     .addSubcommand((s) => s.setName("list").setDescription("List your watches"))
     .addSubcommand((s) =>
-      s
-        .setName("update")
-        .setDescription(
-          "Preview revised criteria; other settings stay unchanged",
-        )
-        .addStringOption((o) =>
-          o.setName("id").setDescription("Watch ID").setRequired(true),
-        )
-        .addStringOption((o) =>
-          o
-            .setName("query")
-            .setDescription("Complete replacement search criteria")
-            .setRequired(true)
-            .setMaxLength(2000),
-        ),
+      sources(
+        s
+          .setName("update")
+          .setDescription(
+            "Replace keywords/filters; unstated sources, area and price limits are kept",
+          )
+          .addStringOption((o) =>
+            o.setName("id").setDescription("Watch ID").setRequired(true),
+          )
+          .addStringOption((o) =>
+            o
+              .setName("query")
+              .setDescription("Complete replacement search criteria")
+              .setRequired(true)
+              .setMaxLength(2000),
+          ),
+      ),
     )
     .addSubcommand((s) =>
       s
@@ -102,98 +122,15 @@ export const commands = [
     ),
   new SlashCommandBuilder()
     .setName("listing")
-    .setDescription("Review saved alert evidence")
+    .setDescription("Review saved alerts")
     .setDMPermission(false)
-    .addSubcommand((s) =>
-      s
-        .setName("evaluate")
-        .setDescription(
-          "Preview a manually submitted Marketplace listing for research",
-        )
-        .addStringOption((o) =>
-          o
-            .setName("watch")
-            .setDescription(
-              "Your watch ID: category, comparable rules and fee assumptions",
-            )
-            .setRequired(true),
-        )
-        .addStringOption((o) =>
-          o
-            .setName("source")
-            .setDescription("Listing source")
-            .addChoices({ name: "Facebook Marketplace", value: "facebook" })
-            .setRequired(true),
-        )
-        .addStringOption((o) =>
-          o
-            .setName("url")
-            .setDescription("Marketplace item URL (never fetched)")
-            .setRequired(true)
-            .setMaxLength(1000),
-        )
-        .addStringOption((o) =>
-          o
-            .setName("title")
-            .setDescription("Listing title")
-            .setRequired(true)
-            .setMaxLength(500),
-        )
-        .addNumberOption((o) =>
-          o
-            .setName("price")
-            .setDescription("Current asking price in USD")
-            .setRequired(true)
-            .setMinValue(0)
-            .setMaxValue(10000000),
-        )
-        .addStringOption((o) =>
-          o
-            .setName("location")
-            .setDescription("City/postal area only; no street address")
-            .setRequired(true)
-            .setMaxLength(200),
-        )
-        .addStringOption((o) =>
-          o
-            .setName("condition")
-            .setDescription("Explicitly stated condition; otherwise unknown")
-            .addChoices(
-              ...[
-                "new",
-                "open_box",
-                "used",
-                "refurbished",
-                "for_parts",
-                "unknown",
-              ].map((value) => ({ name: value, value })),
-            ),
-        )
-        .addStringOption((o) =>
-          o
-            .setName("notes")
-            .setDescription(
-              "Visible model, accessories and condition evidence; omit personal data",
-            )
-            .setMaxLength(4000),
-        )
-        .addNumberOption((o) =>
-          o
-            .setName("travel")
-            .setDescription(
-              "Estimated round-trip pickup cost in USD; default zero",
-            )
-            .setMinValue(0)
-            .setMaxValue(100000),
-        ),
-    )
     .addSubcommand((s) =>
       s.setName("saved").setDescription("Retrieve alerts you saved for later"),
     )
     .addSubcommand((s) =>
       s
         .setName("details")
-        .setDescription("Download full saved alert evidence")
+        .setDescription("Download a saved alert's full details")
         .addStringOption((o) =>
           o
             .setName("alert")
@@ -216,7 +153,7 @@ export const commands = [
     .addSubcommand((s) =>
       s
         .setName("test")
-        .setDescription("Show a private synthetic sample; no real opportunity"),
+        .setDescription("Show a private synthetic sample; not a real listing"),
     ),
   new SlashCommandBuilder()
     .setName("stats")
@@ -224,67 +161,41 @@ export const commands = [
     .setDMPermission(false),
   new SlashCommandBuilder()
     .setName("settings")
-    .setDescription("Preview watch thresholds and delivery changes")
+    .setDescription("Preview price, frequency and channel changes")
     .setDMPermission(false)
     .addStringOption((o) =>
       o.setName("id").setDescription("Watch ID").setRequired(true),
     )
     .addNumberOption((o) =>
       o
-        .setName("discount")
-        .setDescription("Minimum discount percent")
+        .setName("min_price")
+        .setDescription("Minimum listing price in USD")
         .setMinValue(0)
-        .setMaxValue(95),
+        .setMaxValue(10000000),
     )
     .addNumberOption((o) =>
       o
-        .setName("profit")
-        .setDescription("Minimum estimated profit in USD")
-        .setMinValue(0),
+        .setName("max_price")
+        .setDescription("Maximum listing price in USD")
+        .setMinValue(0)
+        .setMaxValue(10000000),
     )
-    .addNumberOption((o) =>
+    .addBooleanOption((o) =>
       o
-        .setName("confidence")
-        .setDescription("Minimum extraction confidence")
-        .setMinValue(0.5)
-        .setMaxValue(1),
-    )
-    .addIntegerOption((o) =>
-      o
-        .setName("comparables")
-        .setDescription("Minimum completed sales")
-        .setMinValue(3)
-        .setMaxValue(100),
-    )
-    .addIntegerOption((o) =>
-      o
-        .setName("lookback")
-        .setDescription("Comparable lookback days")
-        .setMinValue(1)
-        .setMaxValue(365),
+        .setName("clear_price_limits")
+        .setDescription("Remove both price limits (applied before new ones)"),
     )
     .addIntegerOption((o) =>
       o
         .setName("frequency")
-        .setDescription("Polling / notification interval in minutes")
+        .setDescription("Search interval in minutes")
         .setMinValue(60)
         .setMaxValue(10080),
     )
     .addChannelOption((o) =>
       o
         .setName("channel")
-        .setDescription("Strong deal channel")
+        .setDescription("Alert channel")
         .addChannelTypes(ChannelType.GuildText),
-    )
-    .addChannelOption((o) =>
-      o
-        .setName("possible_channel")
-        .setDescription("Optional channel for possible matches")
-        .addChannelTypes(ChannelType.GuildText),
-    )
-    .addBooleanOption((o) =>
-      o
-        .setName("disable_possible")
-        .setDescription("Silently store possible matches"),
     ),
 ].map((c) => c.toJSON());

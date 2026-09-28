@@ -1,52 +1,51 @@
 # Verified deployment status
 
-Checked September 24, 2026 (Pacific time), preferences release.
+Checked September 28, 2026.
 
-## Deployed now
+## Git vs. production
 
-- Existing Supabase project: `xqbbcjnvkpstzjxytusn`.
-- Existing Discord application `ebay`, ID `1550254070189793310`, in `test server`,
+| Item                         | Status                                                                       |
+| ---------------------------- | ---------------------------------------------------------------------------- |
+| Keyword-watch rework         | Implemented, tested locally, committed and pushed to `origin/main`           |
+| Migration `202609280001_...` | **Not applied** to the production project                                    |
+| Edge Functions               | Production still runs the preferences release, **version 5**                 |
+| Slash commands               | Production still has the old set, including `/listing evaluate`; re-register |
+| Monitoring                   | Off (`CLOUD_MONITORING_ENABLED=false`), dry-run on                           |
+| Facebook Marketplace         | Connector stub only; `FACEBOOK_MONITORING_ENABLED=false`                     |
+
+A Git push is not a deployment. Deploy the migration and both functions together:
+the new functions parse only the new watch shape, and the old functions cannot read
+converted watches. Steps are in [NEXT-STEPS.md](NEXT-STEPS.md).
+
+## Production (unchanged since September 24, 2026)
+
+- Supabase project: `xqbbcjnvkpstzjxytusn`.
+- Discord application `ebay`, ID `1550254070189793310`, in `test server`,
   guild ID `1119082301960224930`. No new bot or Supabase project is required.
-- Both Edge Functions are ACTIVE at **version 5**: `discord-interactions` and
-  `scout-worker`. The interactions URL is unchanged:
+- Edge Functions `discord-interactions` and `scout-worker` ACTIVE at version 5.
+  Interactions URL:
   `https://xqbbcjnvkpstzjxytusn.supabase.co/functions/v1/discord-interactions`.
-- Applied `202609240002_preferences.sql` after the two existing migrations:
-  private per-user/server defaults, global 10-active-Marketplace-watch cap, and
-  minimum daily search interval enforced on creates, updates, and resumes.
-- Registered `/defaults`, `/watch`, `/listing`, `/alert`, `/stats`, `/settings`.
-- Gemini's prompt now returns proposed numeric interpretations for confirmation.
-  Edit query is prefilled with the proposed threshold so it can be changed directly.
-- New watches default to Facebook Marketplace match-only criteria. Existing eBay
-  watches and older optional research commands are preserved.
-- Monitoring remains disabled and dry-run remains enabled. The existing worker
-  and retention schedules are unchanged. Bright Data is not connected.
+- Applied migrations: `202609170001_scout.sql`, `202609240001_classifieds.sql`,
+  `202609240002_preferences.sql`.
+- Worker and retention Cron schedules unchanged. `supabase/sql/schedule.sql` does not
+  need re-running for the rework (`scout_cleanup_classifieds()` keeps its name).
 
-## Verification
+## Local verification of the rework
 
-- 45 tests passed, including SQLite and PostgreSQL preference privacy, draft
-  confirmation ownership, 10-watch enforcement, resume enforcement, daily cadence,
-  explicit overrides, invalid recommendations, and Discord command definitions.
-- TypeScript checking, Node build, and both cloud bundles passed.
-- Read back the live Discord command registration: `/defaults` exposes `city`,
-  `zipcode`, `radius`, and `delivery`. Authenticated worker smoke test returned
-  HTTP 200 with `idle: true`; unsigned interactions still return HTTP 401.
-- Two live Gemini requests passed: “lightweight gaming mouse under 20 bucks”
-  proposed `weight_grams lte 50`, asking price $20; editing the criterion to 60
-  produced `weight_grams lte 60` with no repeated recommendation.
-- No test watch or preference was saved in the live database. Your next Discord
-  commands are the user-driven end-to-end acceptance test, not a test already run.
+- `npm run check`: typecheck, all tests, TypeScript build and both Edge Function
+  bundles pass. Tests cover the new migration against PGlite (watch conversion,
+  dropped tables, re-keyed normalization cache, feedback values, grants), per-source
+  scanning with Marketplace disabled, match/no-match listing jobs, both-source
+  defaults and opt-out, update carry-over, the Bright Data stub failing cleanly,
+  Marketplace redaction, and Discord payload limits.
+- `npm run demo` and `npm run format:check` pass.
+- Not verified: the migration on the production database, deployed function
+  behavior, live Gemini prompts after the prompt rewrite, and the Discord
+  acceptance flow. No live watch, preference or provider request was created.
 
 ## Your next manual step
 
-Run `/defaults zipcode:YOUR_ZIP radius:25 delivery:pickup` in the existing server,
-then `/watch create query:lightweight gaming mouse under 20 bucks`. Review the
-suggestion, edit or confirm, and check `/watch list`.
-
-This confirms preferences only. **Automatic Facebook discovery and real matching
-pings are NOT implemented yet.** They need the Bright Data keyword-search adapter,
-monthly record budget enforcement, match-only evaluation and delivery validation.
-You do not need `/listing evaluate` or sold-price evidence for the intended workflow.
-
-Next, create a free Bright Data account and store its API token privately. Follow
-the exact account, free-budget and sanitized request-example instructions in
-[NEXT-STEPS.md](NEXT-STEPS.md). Do not enable monitoring or add paid funds yet.
+Deploy per [NEXT-STEPS.md](NEXT-STEPS.md), then run the Discord acceptance flow:
+`/defaults`, `/watch create query:<keywords>` (preview should show both sources, no
+category or pricing text, one channel), `/watch list`, `/settings`, `/watch update`,
+`/watch pause|resume|delete` and `/alert test`.

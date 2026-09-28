@@ -3,8 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { PGlite } from "@electric-sql/pglite";
 import { updateDefaults, prepareWatch } from "../src/config/preferences.js";
-import { parsed, fees } from "../src/fixtures.js";
-import { Store } from "../src/database/store.js";
+import { parsed } from "../src/fixtures.js";
 import { preview } from "../src/cloud/discord.js";
 import { CloudCommands } from "../src/cloud/commands.js";
 import { CloudStore } from "../src/cloud/store.js";
@@ -37,7 +36,6 @@ const prepare = () =>
     vague,
     "lightweight gaming mouse under $20",
     "channel",
-    fees,
     defaults,
   );
 
@@ -62,34 +60,123 @@ test("defaults validate location, radius, delivery and preserve partial updates"
   assert.ok(commands.find((c: any) => c.name === "defaults"));
 });
 
-test("recommendations become editable draft criteria, not automatic watch activation", () => {
+test("recommendations become editable draft criteria for a both-source watch", () => {
   const result = prepare();
-  assert.deepEqual(result.config.sources, ["facebook_marketplace"]);
-  assert.equal(result.config.purpose, "match");
+  assert.deepEqual(result.config.sources, ["ebay", "facebook_marketplace"]);
   assert.equal(result.config.intervalMinutes, 1440);
   assert.deepEqual(result.config.location, defaults.location);
   assert.deepEqual(result.config.deliveryModes, ["pickup"]);
+  assert.equal(result.config.maxPrice, 85);
   assert.match(result.editableQuery, /weight_grams lte 50/);
+  assert.ok(
+    result.config.constraints.some(
+      (c) => c.key === "weight_grams" && c.value === "50",
+    ),
+  );
   const msg = preview(result.config, "draft", result.notes);
   assert.match(msg.content!, /Confirm recommendation/);
   assert.match(msg.content!, /50 g/);
-  assert.match(msg.content!, /NOT running/);
-  assert.doesNotMatch(msg.content!, /verified sales|Minimum discount/);
-  const store = new Store(":memory:");
-  try {
-    const id = store.draft(
-      "alice",
-      "guild",
-      result.config,
-      result.editableQuery,
-    );
-    assert.equal(store.watches().length, 0);
-    assert.throws(() => store.confirmDraft(id, "bob", "guild"));
-    store.confirmDraft(id, "alice", "guild");
-    assert.equal(store.watches().length, 1);
-  } finally {
-    store.close();
-  }
+  assert.match(msg.content!, /eBay \+ Facebook Marketplace/);
+  assert.match(msg.content!, /not connected yet/);
+  assert.match(msg.content!, /<#channel>/);
+  assert.doesNotMatch(
+    msg.content!,
+    /verified sales|Minimum discount|profit|categor|all-in/i,
+  );
+  assert.doesNotMatch(
+    preview(result.config, "draft", result.notes, true).content!,
+    /not connected/,
+  );
+});
+
+test("sources default to both; opting out is explicit and eBay-only needs no location", () => {
+  assert.throws(
+    () => prepareWatch(parsed, "mouse", "c", null),
+    /defaults|eBay only/,
+  );
+  const ebay = prepareWatch(parsed, "mouse", "c", null, undefined, "ebay_only");
+  assert.deepEqual(ebay.config.sources, ["ebay"]);
+  assert.equal(ebay.config.location, null);
+  assert.equal(ebay.config.deliveryModes, null);
+  assert.equal(ebay.config.intervalMinutes, 60);
+  assert.deepEqual(
+    prepareWatch(parsed, "mouse", "c", defaults, undefined, "facebook_only")
+      .config.sources,
+    ["facebook_marketplace"],
+  );
+  // Query wording can scope the watch; the explicit option still wins.
+  const scoped = { ...parsed, sources: ["ebay" as const] };
+  assert.deepEqual(
+    prepareWatch(scoped, "mouse on ebay", "c", null).config.sources,
+    ["ebay"],
+  );
+  assert.deepEqual(
+    prepareWatch(scoped, "mouse on ebay", "c", defaults, undefined, "both")
+      .config.sources,
+    ["ebay", "facebook_marketplace"],
+  );
+  // Default exclusions do not fight the search itself.
+  const parts = prepareWatch(
+    { ...parsed, searchTerms: "gpu for parts" },
+    "gpu for parts",
+    "c",
+    null,
+    undefined,
+    "ebay_only",
+  ).config.excludedKeywords;
+  assert.ok(!parts.includes("for parts"));
+  assert.ok(parts.includes("broken"));
+});
+
+test("updates replace criteria but keep unstated sources, area, price limits, channel and frequency", () => {
+  const previous = {
+    ...prepare().config,
+    sources: ["ebay" as const],
+    location: null,
+    deliveryModes: null,
+    minPrice: 10,
+    maxPrice: 40,
+    channelId: "old-channel",
+    intervalMinutes: 180,
+  };
+  const next = prepareWatch(
+    {
+      ...parsed,
+      searchTerms: "wired gaming mouse",
+      maxPrice: null,
+      constraints: [],
+    },
+    "wired gaming mouse",
+    "new-channel",
+    null,
+    previous,
+  ).config;
+  assert.equal(next.searchTerms, "wired gaming mouse");
+  assert.deepEqual(next.constraints, []);
+  assert.deepEqual(next.sources, ["ebay"]);
+  assert.equal(next.minPrice, 10);
+  assert.equal(next.maxPrice, 40);
+  assert.equal(next.channelId, "old-channel");
+  assert.equal(next.intervalMinutes, 180);
+  const priced = prepareWatch(
+    { ...parsed, maxPrice: 30 },
+    "mouse under 30",
+    "c",
+    null,
+    previous,
+  ).config;
+  assert.equal(priced.minPrice, null);
+  assert.equal(priced.maxPrice, 30);
+  // Adding Marketplace to an hourly watch enforces the daily minimum.
+  const widened = prepareWatch(
+    parsed,
+    "mouse",
+    "c",
+    defaults,
+    previous,
+    "both",
+  ).config;
+  assert.equal(widened.intervalMinutes, 1440);
 });
 
 test("explicit settings win; unresolved/conflicting/invalid interpretations cannot be confirmed", () => {
@@ -98,22 +185,16 @@ test("explicit settings win; unresolved/conflicting/invalid interpretations cann
     { ...parsed, location, deliveryModes: ["shipping"] },
     "mouse",
     "c",
-    fees,
     defaults,
   );
   assert.deepEqual(result.config.location, location);
   assert.deepEqual(result.config.deliveryModes, ["shipping"]);
-  assert.throws(
-    () => prepareWatch(parsed, "mouse", "c", fees, null),
-    /defaults/,
-  );
   assert.throws(
     () =>
       prepareWatch(
         { ...vague, constraints: [vague.recommendations[0]!.constraint] },
         "mouse",
         "c",
-        fees,
         defaults,
       ),
     /conflicting/,
@@ -124,10 +205,13 @@ test("explicit settings win; unresolved/conflicting/invalid interpretations cann
         { ...parsed, clarifications: ["Which size?"] },
         "mouse",
         "c",
-        fees,
         defaults,
       ),
     /clarify/,
+  );
+  assert.throws(
+    () => prepareWatch({ ...parsed, confidence: 0.3 }, "mouse", "c", defaults),
+    /uncertain/,
   );
   assert.throws(
     () =>
@@ -147,43 +231,10 @@ test("explicit settings win; unresolved/conflicting/invalid interpretations cann
         },
         "mouse",
         "c",
-        fees,
         defaults,
       ),
     /numeric/,
   );
-});
-
-test("SQLite preferences are owner/server isolated and active Marketplace slots are capped", () => {
-  const store = new Store(":memory:");
-  try {
-    store.saveDefaults("alice", "guild", defaults);
-    assert.deepEqual(store.defaults("alice", "guild"), defaults);
-    assert.equal(store.defaults("bob", "guild"), null);
-    assert.equal(store.defaults("alice", "other"), null);
-    const config = prepare().config;
-    const ids = Array.from({ length: 10 }, (_, n) =>
-      store.createWatch(`user${n}`, "guild", config),
-    );
-    assert.throws(
-      () => store.createWatch("alice", "guild", config),
-      /Maximum 10/,
-    );
-    store.setActive(ids[0]!, "user0", "guild", false);
-    store.createWatch("alice", "guild", config);
-    assert.throws(
-      () => store.setActive(ids[0]!, "user0", "guild", true),
-      /Maximum 10/,
-    );
-    store.setActive(ids[1]!, "user1", "guild", false);
-    assert.throws(
-      () =>
-        store.createWatch("alice", "guild", { ...config, intervalMinutes: 60 }),
-      /1440/,
-    );
-  } finally {
-    store.close();
-  }
 });
 
 test("cloud /defaults reads and writes without using Gemini", async (t) => {
@@ -247,7 +298,7 @@ test("cloud /defaults reads and writes without using Gemini", async (t) => {
   );
 });
 
-test("PostgreSQL migration enforces default privacy, global slots and daily cadence", async () => {
+test("PostgreSQL enforces default privacy and caps watches that include Marketplace", async () => {
   const db = new PGlite();
   try {
     await db.exec(
@@ -257,6 +308,7 @@ test("PostgreSQL migration enforces default privacy, global slots and daily cade
       "202609170001_scout.sql",
       "202609240001_classifieds.sql",
       "202609240002_preferences.sql",
+      "202609280001_keyword_watch.sql",
     ])
       await db.exec(readFileSync(`supabase/migrations/${file}`, "utf8"));
     await db.query(
@@ -298,6 +350,17 @@ test("PostgreSQL migration enforces default privacy, global slots and daily cade
     await assert.rejects(
       db.exec("update scout_watches set active=true where owner_id='user0'"),
       /Maximum 10/,
+    );
+    // eBay-only watches are outside the Marketplace budget cap and daily cadence.
+    await db.query(
+      "insert into scout_watches(owner_id,guild_id,config) values('ebay','guild',$1)",
+      [
+        JSON.stringify({
+          ...prepare().config,
+          sources: ["ebay"],
+          intervalMinutes: 60,
+        }),
+      ],
     );
   } finally {
     await db.close();

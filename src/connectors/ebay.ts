@@ -1,13 +1,8 @@
 import { Listing, type WatchConfig } from "../config/schema.js";
-import { templates } from "../config/categories.js";
 import { type Env, requireValues } from "../config/env.js";
 import { HttpError, requestJson } from "./http.js";
 import { log } from "../logging.js";
-import {
-  assertSourceAccess,
-  validateScheduledWatch,
-  type ListingSourceConnector,
-} from "./source.js";
+import { assertSourceAccess, type ListingSourceConnector } from "./source.js";
 export type { ListingSource } from "./source.js";
 export function mapCondition(id: unknown): Listing["condition"] {
   const n = Number(id);
@@ -99,12 +94,11 @@ export class EbaySource implements ListingSourceConnector {
   }
   validateWatch(watch: WatchConfig) {
     assertSourceAccess(this.source, this.provider, this.accessMode, true);
-    validateScheduledWatch(watch);
+    if (!watch.sources.includes(this.source))
+      throw new Error("Watch does not include eBay.");
   }
   private token = "";
   private expires = 0;
-  private categoryCache = new Set<string>();
-  private treeId: string | null = null;
   private base: string;
   constructor(
     private env: Env,
@@ -170,34 +164,12 @@ export class EbaySource implements ListingSourceConnector {
       }
     }
   }
-  async resolveCategory(category: WatchConfig["category"]) {
-    const id = templates[category].categoryId;
-    if (this.categoryCache.has(id)) return id;
-    if (!this.treeId) {
-      const tree = await this.get(
-        "/commerce/taxonomy/v1/get_default_category_tree_id?marketplace_id=EBAY_US",
-      );
-      if (!/^\d+$/.test(tree.categoryTreeId))
-        throw new Error("Invalid category tree");
-      this.treeId = tree.categoryTreeId;
-    }
-    const result = await this.get(
-      `/commerce/taxonomy/v1/category_tree/${this.treeId}/get_category_subtree?category_id=${id}`,
-    );
-    if (result.categorySubtreeNode?.category?.categoryId !== id)
-      throw new Error(
-        `Category ${category} is no longer valid. Update its template.`,
-      );
-    this.categoryCache.add(id);
-    return id;
-  }
   async *search(watch: WatchConfig) {
     this.validateWatch(watch);
     if (watch.buying !== "fixed" && !this.env.EBAY_ALLOW_AUCTIONS)
       throw new Error(
         "Auction access is disabled; update watch to fixed or enable approved auction access.",
       );
-    const category = await this.resolveCategory(watch.category);
     const buying =
       watch.buying === "fixed"
         ? "FIXED_PRICE"
@@ -208,7 +180,6 @@ export class EbaySource implements ListingSourceConnector {
     for (let page = 0; page < this.env.MAX_PAGES_PER_WATCH; page++) {
       const query = new URLSearchParams({
         q: watch.searchTerms,
-        category_ids: category,
         filter: `buyingOptions:{${buying}},itemLocationCountry:US,deliveryCountry:US`,
         sort: "newlyListed",
         limit: "50",
@@ -231,7 +202,7 @@ export class EbaySource implements ListingSourceConnector {
       if (!response.next) break;
       if (page === this.env.MAX_PAGES_PER_WATCH - 1)
         log("search_truncated", {
-          category: watch.category,
+          source: this.source,
           pages: this.env.MAX_PAGES_PER_WATCH,
         });
     }

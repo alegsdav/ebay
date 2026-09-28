@@ -28,7 +28,7 @@ In the Developer Portal, open **Installation** (or **OAuth2 → URL Generator**,
 2. Select the scopes **bot** and **applications.commands**.
 3. Select these bot permissions: **View Channels**, **Send Messages**, **Embed Links**, **Attach Files**.
 4. Use the generated installation link and select your server. You need permission to add applications there.
-5. Create a text channel such as `#deal-alerts`. Optionally create `#possible-deals` for lower-confidence candidates.
+5. Create a text channel such as `#watch-alerts`. Each watch posts its matches to one channel.
 6. Check the channel's permission overrides. Both you and the bot must be able to view and send messages; the bot also needs embeds and attachments. An explicit channel deny can override permissions granted at installation.
 
 Do not grant Administrator. Threads, DMs and announcement channels are not supported destinations in this version.
@@ -77,19 +77,21 @@ This registers the application commands **for your configured server**. It repla
 3. With your Gemini key configured, try:
 
    ```text
-   /watch create query: wireless gaming mice under $80, new or open box, at least 20% below market
+   /watch create query: wireless gaming mice under $80, new or open box
    ```
 
-4. The bot acknowledges the command promptly, then processes it through the queue. It returns a preview and `watch-preview.json` with all rules and fee assumptions.
+   The watch searches eBay and Facebook Marketplace by default. Add `sources:eBay only` or `sources:Facebook Marketplace only` to opt out of one. Marketplace needs `/defaults` (city or ZIP, radius, delivery) first.
+
+4. The bot acknowledges the command promptly, then processes it through the queue. It returns a preview (keywords, sources, price range, filters, channel) and `watch-preview.json` with the complete rules.
 5. Read the preview. **Edit query** opens a modal for a complete replacement request. **Cancel** discards it. **Confirm watch** saves it. Preview buttons expire after 15 minutes and work only for their creator.
-6. Use `/watch list` to copy the saved watch ID. `/settings id:… possible_channel:…` enables the optional lower-confidence channel; confirm that preview too.
-7. `/watch pause`, `/watch resume`, `/watch update` and `/watch delete` manage it. `/listing saved` retrieves saved alerts; `/listing details` accepts the alert ID from an alert footer.
+6. Use `/watch list` to copy the saved watch ID. `/settings id:… max_price:… frequency:… channel:…` previews price-range, frequency or channel changes; confirm that preview too.
+7. `/watch pause`, `/watch resume`, `/watch update` and `/watch delete` manage it. `/watch update` replaces the keywords and filters; sources, search area and price limits carry over unless the new query states them. `/listing saved` retrieves saved alerts; `/listing details` accepts the alert ID from an alert footer.
 
 ## 8. Enable actual monitoring
 
-Finish the [eBay setup](ebay-data-options.md), import verified sold records using [the comparable guide](comparables.md), and install the Supabase Cron schedule. Set `CLOUD_MONITORING_ENABLED=true` while keeping `DRY_RUN=true`. Review function logs and `scout_processing` in the Supabase Table Editor. Then change `DRY_RUN=false` when ready for opportunity posts.
+Finish the [eBay setup](ebay-data-options.md) and install the Supabase Cron schedule. Set `CLOUD_MONITORING_ENABLED=true` while keeping `DRY_RUN=true`. Review function logs and `scout_processing` in the Supabase Table Editor. Then change `DRY_RUN=false` when ready for match posts. Keep `FACEBOOK_MONITORING_ENABLED=false` until the Bright Data connector is implemented; the eBay leg of every watch runs normally meanwhile.
 
-Unknown shipping, unknown required attributes or insufficient verified comparables intentionally produce no deal alert. A working `/alert test` verifies Discord presentation, not marketplace access or deal quality.
+A listing that fails a filter, is judged not relevant, or lacks evidence for a required attribute is stored silently. A working `/alert test` verifies Discord presentation, not marketplace access or match quality.
 
 ## Troubleshooting
 
@@ -98,7 +100,7 @@ Unknown shipping, unknown required attributes or insufficient verified comparabl
 | Slash commands do not appear                       | Correct server/application IDs, install scope, registration result; reload Discord.                                                                          |
 | “Application did not respond”                      | Interactions endpoint, signature key, function logs, paused Supabase project or slow database response. Initial acknowledgement must occur within 3 seconds. |
 | Command stays “thinking”                           | `scout_jobs` and worker logs; worker secret must match Vault; Cron must be running. Interaction tokens are short-lived.                                      |
-| Preview works but no alerts                        | Monitoring flag, dry-run flag, eBay credentials/approval, source errors and suitable sold evidence.                                                          |
+| Preview works but no alerts                        | Monitoring flag, dry-run flag, eBay credentials/approval, source errors and `scout_processing` rejection reasons.                                            |
 | Permission error                                   | Check channel-specific user and bot overrides, not just the bot's server role.                                                                               |
 | One person cannot use the bot                      | Check `ALLOWED_USER_IDS` and watch ownership.                                                                                                                |
 | No automatic retry after an uncertain Discord post | Inspect `scout_alerts`: ambiguous deliveries are held to avoid duplicate alerts.                                                                             |

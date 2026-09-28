@@ -1,19 +1,18 @@
 # Bright Data account and API setup
 
-This guide prepares Bright Data for the planned Facebook Marketplace connector. It does not enable Marketplace monitoring by itself.
+This guide prepares Bright Data for the Facebook Marketplace leg of keyword watches. The connector in `src/connectors/brightdata.ts` is a stub until the keyword-search contract below is captured. Nothing here enables Marketplace monitoring by itself.
 
-Current status (September 27, 2026): the account is created but the user reports
-that it is suspended, with no free credits visible. Contact provider support before
-any collection or payment. The saved local credential uses `BRIGHT_DATA_API_KEY`;
-the `BRIGHTDATA_API_TOKEN` name below is an earlier proposed connector name, not
-a requirement to save a second key. No connector currently consumes either name.
+Current status (September 28, 2026): the account now has $5 of usable credit.
+Earlier it was suspended with no free credits; do not add more funds or enable
+auto-recharge. The credential name is `BRIGHT_DATA_API_KEY` and the dataset ID is
+`BRIGHT_DATA_DATASET_ID`. The stub connector does not read either yet.
 
 ## Values the application will need
 
 ```text
-BRIGHTDATA_API_TOKEN=secret account-level bearer token
-BRIGHTDATA_MARKETPLACE_DATASET_ID=non-secret scraper identifier
-FACEBOOK_PROVIDER=brightdata
+BRIGHT_DATA_API_KEY=secret account-level bearer token
+BRIGHT_DATA_DATASET_ID=non-secret keyword-discovery scraper identifier
+BRIGHT_DATA_MAX_CALLS_PER_DAY=10
 FACEBOOK_MONITORING_ENABLED=false
 ```
 
@@ -50,7 +49,7 @@ Bright Data currently lists multiple Marketplace products:
 - **Collect Facebook Marketplace listings by keyword**: discovers listings for a search term.
 - **Discover by URL**: discovers records from a supplied Marketplace search/category URL.
 
-Auction Scout ultimately needs a discovery scraper for scheduled watches and the single-listing scraper only when a detail refresh is necessary.
+Keyword watches need the keyword discovery scraper for scheduled searches, and the single-listing scraper only if a detail refresh proves necessary.
 
 For the proof of concept:
 
@@ -68,13 +67,12 @@ Save the dataset ID separately from the API token.
 Add these lines to the Git-ignored `.env.supabase` file:
 
 ```dotenv
-BRIGHTDATA_API_TOKEN=replace_with_the_real_token
-BRIGHTDATA_MARKETPLACE_DATASET_ID=replace_with_the_keyword_scraper_dataset_id
-FACEBOOK_PROVIDER=brightdata
+BRIGHT_DATA_API_KEY=replace_with_the_real_token
+BRIGHT_DATA_DATASET_ID=replace_with_the_keyword_scraper_dataset_id
 FACEBOOK_MONITORING_ENABLED=false
 ```
 
-Keep monitoring disabled. The existing application does not use these values until the Marketplace connector is implemented.
+Keep monitoring disabled. The application does not use these values until the Marketplace connector's real `search()` is implemented.
 
 The token does not belong in `.env.supabase.example`; only an empty placeholder belongs in the example file. The real `.env.supabase` is ignored by Git.
 
@@ -84,7 +82,7 @@ The token can be checked against Bright Data's account API before running a scra
 
 ```sh
 curl -sS \
-  -H "Authorization: Bearer $BRIGHTDATA_API_TOKEN" \
+  -H "Authorization: Bearer $BRIGHT_DATA_API_KEY" \
   https://api.brightdata.com/zone/get_active_zones
 ```
 
@@ -125,7 +123,7 @@ Supabase Edge Functions receive the token at runtime. Never store it in a databa
 
 ## Cost guardrails
 
-- Start with one watch, one location and a six-hour interval.
+- Start with one watch and one location; Marketplace watches run at most daily.
 - Request the fewest records and pages possible.
 - Count delivered records, not just HTTP calls; Bright Data bills the Marketplace scraper per successful record.
 - Set an application daily-record limit below the monthly free allowance.
@@ -137,7 +135,7 @@ Supabase Edge Functions receive the token at runtime. Never store it in a databa
 
 Do not send the API token. Provide only:
 
-- Confirmation that `BRIGHTDATA_API_TOKEN` is saved in `.env.supabase`.
+- Confirmation that `BRIGHT_DATA_API_KEY` is saved in `.env.supabase`.
 - The keyword-discovery `dataset_id`.
 - The input-field names shown by Bright Data.
 - A redacted sample JSON response.

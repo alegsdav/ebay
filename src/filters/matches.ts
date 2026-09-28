@@ -11,12 +11,14 @@ export function basicReject(
 ): string | null {
   const haystack =
     `${l.title} ${l.description} ${l.specifics.map((a) => `${a.key} ${a.value}`).join(" ")}`.toLowerCase();
+  if (!w.sources.includes(l.source)) return "Source not enabled for watch";
   if (w.excludedKeywords.some((k) => haystack.includes(k.toLowerCase())))
     return "Excluded keyword";
   if (l.source === "ebay" && l.country !== w.country)
     return "Unknown or excluded item location";
   if (
     l.source === "ebay" &&
+    w.minSellerPercent !== null &&
     (l.sellerPercent === null || l.sellerPercent < w.minSellerPercent)
   )
     return "Unknown or insufficient seller rating";
@@ -25,12 +27,13 @@ export function basicReject(
     ["sold", "removed", "pending"].includes(l.provenance.status)
   )
     return "Listing is not active";
-  if (w.maxAskingPrice != null && l.price > w.maxAskingPrice)
-    return "Over asking-price budget";
-  if (!w.conditions.includes(l.condition))
+  if (w.maxPrice !== null && l.price > w.maxPrice) return "Above maximum price";
+  if (w.minPrice !== null && l.price < w.minPrice) return "Below minimum price";
+  // Marketplace providers may omit condition; the extracted condition decides then.
+  const deferCondition =
+    l.source === "facebook_marketplace" && l.condition === "unknown";
+  if (!deferCondition && !w.conditions.includes(l.condition))
     return "Excluded or unknown condition";
-  if (w.maxAllIn !== null && l.price > w.maxAllIn)
-    return "Over budget before fees";
   if (l.endTime && Date.parse(l.endTime) <= now) return "Listing ended";
   if (
     (w.buying === "fixed" && l.auction) ||
@@ -40,8 +43,7 @@ export function basicReject(
   return null;
 }
 export function constraintReject(n: Normalized, w: WatchConfig): string | null {
-  if (n.category !== w.category || n.matchStatus === "not_match")
-    return "Wrong category";
+  if (n.matchStatus === "not_match") return "Not relevant to the search";
   if (!w.conditions.includes(n.condition))
     return "Extracted condition excluded or unknown";
   const values = attributes(n);
