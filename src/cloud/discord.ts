@@ -19,7 +19,7 @@ export interface Message {
   components?: any[];
   files?: { name: string; content: string }[];
 }
-const clean = (s: string) =>
+export const clean = (s: string) =>
   s.replace(/([\\*_`~|<>])/g, "\\$1").replace(/@/g, "＠");
 const money = (n: number) => `$${n.toFixed(2)}`;
 export function actor(i: Interaction) {
@@ -158,6 +158,12 @@ export class DiscordHttp {
       throw new Error(
         "You and the bot need channel access and Send Messages; the bot also needs Embed Links and Attach Files.",
       );
+  }
+  post(channel: string, message: Message) {
+    return this.request(`/channels/${channel}/messages`, "POST", {
+      ...message,
+      allowed_mentions: { parse: [] },
+    });
   }
   send(channel: string, message: Message, alertId: string) {
     return this.request(`/channels/${channel}/messages`, "POST", {

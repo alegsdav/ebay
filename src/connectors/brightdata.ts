@@ -194,6 +194,12 @@ export function providerCity(location: NonNullable<WatchConfig["location"]>) {
   const m = /^(.*),\s*([A-Z]{2})$/.exec(city);
   return m && states[m[2]!] ? `${m[1]}, ${states[m[2]!]}` : city;
 }
+// Facebook pads small-radius searches with unrelated items, so never search tighter
+// than the configured minimum.
+export const providerRadius = (
+  location: NonNullable<WatchConfig["location"]>,
+  min: number,
+) => Math.max(min, location.radiusMiles);
 export type SnapshotStatus =
   "starting" | "running" | "ready" | "failed" | "canceled";
 // Bright Data keyword discovery is asynchronous (1–6 minutes per search): the worker
@@ -267,7 +273,10 @@ export class BrightDataSource implements SnapshotSourceConnector {
             {
               keyword: watch.searchTerms,
               city: providerCity(watch.location!),
-              radius: watch.location!.radiusMiles,
+              radius: providerRadius(
+                watch.location!,
+                this.env.BRIGHT_DATA_MIN_RADIUS,
+              ),
               date_listed: opts.recentOnly
                 ? this.env.BRIGHT_DATA_RECENT_FILTER
                 : "",

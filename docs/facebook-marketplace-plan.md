@@ -39,7 +39,9 @@ different region; "Portland, OR" returned Portland-area listings, but "Campbell,
 was not recognized (results fell back to Virginia) while "Campbell, California"
 worked, so the connector sends full state names (`providerCity()`). An unrecognized
 city is detected when no listing in a batch is in the watch's state. `radius` is
-applied loosely (metro-area results).
+applied loosely (metro-area results), and a 5-mile radius returned no exact matches
+(unrelated items from other states) where 20 miles returned five, so searches use at
+least `BRIGHT_DATA_MIN_RADIUS` (20).
 Identical searches returned different listings each time, not sorted by date, and
 "Last 24 hours" still returned older listings. Small polls may therefore miss some
 new listings; the discover-by-URL mode (which could sort newest first) was rejected

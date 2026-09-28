@@ -41,6 +41,12 @@ local SQLite/gateway bot.
 - Facebook's keyword search is fuzzy: a "lofree flow keyboard" search returns many
   generic keyboards. Gemini rejects those, so pings only come for real matches.
 
+- Searches use at least a 20-mile radius: at 5 miles Facebook returned no Lofree
+  listings and padded results with unrelated keyboards from other states, while the
+  same search at 20 miles returned five Lofree Flow keyboards.
+- `#debug-console` (`DEBUG_CHANNEL_ID`) shows each search, what Bright Data returned,
+  and why each listing was pinged, skipped or filtered.
+
 ## Your next manual actions
 
 1. Watch your alert channel. If a ping is not what you want, press **Not relevant**

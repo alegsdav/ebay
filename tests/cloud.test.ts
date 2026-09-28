@@ -708,3 +708,60 @@ test("Bright Data receives full state names; unknown or foreign regions pass thr
   assert.equal(at("Springfield"), "Springfield");
   assert.equal(at("97201"), null);
 });
+test("small radii are widened for Bright Data and the debug channel explains each step", async (t) => {
+  const posts: { channel: string; content: string }[] = [];
+  const triggers: any[] = [];
+  t.mock.method(globalThis, "fetch", async (url: any, init: any) => {
+    const u = new URL(String(url));
+    if (u.hostname === "discord.com") {
+      posts.push({
+        channel: u.pathname.split("/")[4]!,
+        content: JSON.parse(init.body).content,
+      });
+      return Response.json({ id: "m" });
+    }
+    if (u.pathname === "/datasets/v3/trigger") {
+      triggers.push(JSON.parse(init.body).input[0]);
+      return Response.json({ snapshot_id: "sd_1" });
+    }
+    if (u.pathname.startsWith("/datasets/v3/progress/"))
+      return Response.json({ status: "ready" });
+    if (u.pathname.startsWith("/datasets/v3/snapshot/"))
+      return Response.json([
+        fbRecord("1", "2026-09-27T00:00:00.000Z"),
+        fbRecord("2", "2026-09-26T00:00:00.000Z", "Mouse, broken wheel"),
+      ]);
+    throw new Error(`Unexpected ${u}`);
+  });
+  const { db, state } = marketplaceDb();
+  (db as any).watch = async () => ({
+    id: "w",
+    active: true,
+    revision: 1,
+    config: { ...both, location: { ...area, radiusMiles: 5 } },
+  });
+  const c = marketplaceWorker({ DEBUG_CHANNEL_ID: "1554167190230536292" });
+  const signal = AbortSignal.timeout(5000);
+  await processJob(job("scan", {}), c, db, signal);
+  assert.equal(triggers[0].radius, 20);
+  const [snap] = state.jobs.splice(0);
+  await processJob(job("snapshot", snap.payload), c, db, signal);
+  assert.ok(posts.every((p) => p.channel === "1554167190230536292"));
+  assert.match(posts[0]!.content, /first search.*near Portland, Oregon, 20 mi/);
+  assert.match(posts[1]!.content, /returned 2 records/);
+  assert.match(
+    posts[1]!.content,
+    /checking with Gemini: \[Wireless gaming mouse\]/,
+  );
+  assert.match(posts[1]!.content, /filtered \(Excluded keyword\)/);
+  // Without a debug channel nothing extra is posted.
+  posts.length = 0;
+  const quiet = marketplaceDb();
+  await processJob(
+    job("scan", {}, "j2"),
+    marketplaceWorker(),
+    quiet.db,
+    signal,
+  );
+  assert.equal(posts.length, 0);
+});

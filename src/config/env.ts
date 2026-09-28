@@ -26,6 +26,11 @@ const Env = z.object({
   BRIGHT_DATA_POLL_RECORDS: z.coerce.number().int().min(1).max(50).default(2),
   // Bright Data's date_listed filter for follow-up polls; empty disables it.
   BRIGHT_DATA_RECENT_FILTER: z.string().max(40).default("Last 24 hours"),
+  // Live tests: a 5-mile Marketplace search returned no exact matches and padded
+  // results with unrelated items from other states; 20 miles returned exact matches.
+  BRIGHT_DATA_MIN_RADIUS: z.coerce.number().int().min(1).max(500).default(20),
+  // Optional Discord channel for per-search and per-listing diagnostics.
+  DEBUG_CHANNEL_ID: z.string().regex(/^\d*$/).default(""),
   // Guard against runaway API loops (trigger, progress and download calls are free).
   BRIGHT_DATA_MAX_CALLS_PER_DAY: z.coerce
     .number()

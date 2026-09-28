@@ -5,11 +5,16 @@ import {
   actor,
   DiscordHttp,
   alertMessage,
+  clean,
   type Interaction,
 } from "./discord.js";
 import { LlmClient, PROMPT_VERSION } from "../llm/client.js";
 import { EbaySource } from "../connectors/ebay.js";
-import { BrightDataSource, providerCity } from "../connectors/brightdata.js";
+import {
+  BrightDataSource,
+  providerCity,
+  providerRadius,
+} from "../connectors/brightdata.js";
 import { Listing, type WatchConfig } from "../config/schema.js";
 import { basicReject } from "../filters/matches.js";
 import { evaluateMatch, minExtractionConfidence } from "../filters/evaluate.js";
@@ -232,8 +237,10 @@ export async function processJob(
     signal,
     job.kind === "scan",
   );
-  if (job.kind === "scan") return scan(job, w, sources, c, db);
-  if (job.kind === "snapshot") return collectSnapshot(job, w, sources, c, db);
+  const debug = debugFeed(c, discord, w.config.name);
+  if (job.kind === "scan") return scan(job, w, sources, c, db, debug);
+  if (job.kind === "snapshot")
+    return collectSnapshot(job, w, sources, c, db, debug);
   let listing = Listing.parse(job.payload.listing);
   if (!sources[listing.source === "ebay" ? "ebay" : "facebook"]) {
     log("cloud_listing_skipped", {
@@ -253,6 +260,7 @@ export async function processJob(
     const reject = basicReject(listing, w.config);
     if (reject) {
       await db.process(w.id, listing.id, "filtered", { reason: reject });
+      await debug(`⛔ filtered (${reject}): ${describe(listing)}`);
       return;
     }
     const model = llm();
@@ -292,6 +300,7 @@ export async function processJob(
         reason: match.reason,
         warnings: match.warnings,
       });
+      await debug(`❌ skipped (${match.reason}): ${describe(listing)}`);
       return;
     }
     await db.process(w.id, listing.id, "matched", {
@@ -304,6 +313,7 @@ export async function processJob(
         listingId: listing.id,
         source: listing.source,
       });
+      await debug(`🧪 match, dry-run so not posted: ${describe(listing)}`);
       return;
     }
     const id = await db.rpc("scout_reserve_alert", {
@@ -324,6 +334,9 @@ export async function processJob(
         { id: `eq.${id}` },
         { status: "sent", message_id: message.id },
       );
+      await debug(
+        `✅ match, pinged in <#${w.config.channelId}>: ${describe(listing)}`,
+      );
     } catch (error) {
       await db.update(
         "scout_alerts",
@@ -331,6 +344,9 @@ export async function processJob(
         { status: "delivery_unknown" },
       );
       log("cloud_delivery_unknown", { alertId: id, error: errorKind(error) });
+      await debug(
+        `⚠️ match, but the Discord post failed: ${describe(listing)}`,
+      );
     }
   } catch (error) {
     await db.process(
@@ -345,6 +361,29 @@ export async function processJob(
   }
 }
 type Sources = ReturnType<typeof sourceConnectors>;
+type Debug = (text: string) => Promise<void>;
+// Diagnostics for DEBUG_CHANNEL_ID: what each search returned and why each listing
+// was pinged or skipped. Failures here never affect the pipeline.
+function debugFeed(c: CloudConfig, discord: DiscordHttp, watch: string): Debug {
+  const channel = c.env.DEBUG_CHANNEL_ID;
+  return async (text) => {
+    if (!channel) return;
+    await discord
+      .post(channel, {
+        content: `**${clean(watch).slice(0, 80)}** · ${text}`.slice(0, 1900),
+      })
+      .catch((error) => log("debug_post_failure", { error: errorKind(error) }));
+  };
+}
+function describe(l: Listing) {
+  const where = l.provenance?.locationLabel
+    ? ` · ${clean(l.provenance.locationLabel).slice(0, 60)}`
+    : "";
+  const listed = l.listedAt
+    ? ` · listed <t:${Math.floor(Date.parse(l.listedAt) / 1000)}:R>`
+    : "";
+  return `[${clean(l.title).slice(0, 90)}](<${l.url}>) · $${l.price}${where}${listed}`;
+}
 type ActiveWatch = NonNullable<Awaited<ReturnType<CloudStore["watch"]>>>;
 const recordBudget = "brightdata_records";
 // Each source is scanned independently: one failing or disabled leg never
@@ -355,6 +394,7 @@ async function scan(
   sources: Sources,
   c: CloudConfig,
   db: CloudStore,
+  debug: Debug,
 ) {
   const candidates = new Map<string, Listing>();
   const failures: unknown[] = [];
@@ -370,7 +410,8 @@ async function scan(
           if (found >= c.CLOUD_ITEMS_PER_WATCH) break;
         }
       }),
-    sources.facebook && (() => startSnapshot(w, sources.facebook!, c, db)),
+    sources.facebook &&
+      (() => startSnapshot(w, sources.facebook!, c, db, debug)),
   ].filter((leg) => !!leg);
   for (const leg of legs)
     try {
@@ -380,6 +421,9 @@ async function scan(
       if (error instanceof HttpError && error.status === 429)
         await db.cooldown(error.service, error.retryAt).catch(() => {});
       log("cloud_source_failure", { watchId: w.id, error: errorKind(error) });
+      await debug(
+        `⚠️ search failed: ${errorKind(error)}${error instanceof HttpError ? ` (${error.service} HTTP ${error.status})` : error instanceof Error && error.name === "Error" ? ` (${clean(error.message).slice(0, 200)})` : ""}`,
+      );
     }
   if (legs.length && failures.length === legs.length) throw failures[0];
   const old = await db.rows("scout_processing", {
@@ -423,11 +467,16 @@ async function startSnapshot(
   facebook: BrightDataSource,
   c: CloudConfig,
   db: CloudStore,
+  debug: Debug,
 ) {
+  const city = w.config.location && providerCity(w.config.location);
+  const radius =
+    w.config.location &&
+    providerRadius(w.config.location, c.env.BRIGHT_DATA_MIN_RADIUS);
   const queryKey = await digest({
     searchTerms: w.config.searchTerms,
-    city: w.config.location && providerCity(w.config.location),
-    radius: w.config.location?.radiusMiles,
+    city,
+    radius,
   });
   const initial = !(
     await db.rows("scout_ingestion_runs", {
@@ -444,6 +493,9 @@ async function startSnapshot(
   const cap = c.env.BRIGHT_DATA_MAX_RECORDS_PER_MONTH;
   if (!(await db.monthlyBudget(recordBudget, limit, cap))) {
     log("brightdata_budget_exhausted", { watchId: w.id, limit, cap });
+    await debug(
+      `💸 Marketplace search skipped: monthly cap of ${cap} Bright Data records reached`,
+    );
     return;
   }
   let snapshotId: string;
@@ -473,6 +525,9 @@ async function startSnapshot(
     }),
   ]);
   log("brightdata_triggered", { watchId: w.id, limit, initial });
+  await debug(
+    `🔎 Marketplace ${initial ? "first search" : "poll"}: "${clean(w.config.searchTerms)}" near ${clean(city ?? "?")}, ${radius} mi · up to ${limit} records${initial ? "" : ` · date filter "${clean(c.env.BRIGHT_DATA_RECENT_FILTER)}"`}`,
+  );
 }
 function snapshotJob(
   w: ActiveWatch,
@@ -496,6 +551,7 @@ async function collectSnapshot(
   sources: Sources,
   c: CloudConfig,
   db: CloudStore,
+  debug: Debug,
 ) {
   const p = job.payload as {
     snapshotId: string;
@@ -521,6 +577,7 @@ async function collectSnapshot(
     if (p.polls >= 20) {
       await finish({ status: "failed", error_kind: "snapshot_timeout" });
       log("brightdata_snapshot_timeout", { watchId: w.id });
+      await debug("⚠️ Bright Data search timed out after 20 checks");
       return;
     }
     await db.enqueue([snapshotJob(w, { ...p, polls: p.polls + 1 })]);
@@ -530,6 +587,7 @@ async function collectSnapshot(
     await db.monthlyBudget(recordBudget, -p.reserved, cap).catch(() => {});
     await finish({ status: "failed", error_kind: `snapshot_${status}` });
     log("brightdata_snapshot_failed", { watchId: w.id, status });
+    await debug(`⚠️ Bright Data search ${status}`);
     return;
   }
   const result = await sources.facebook.download(p.snapshotId);
@@ -563,14 +621,19 @@ async function collectSnapshot(
       received: [...new Set(states)],
     });
   const accepted: Listing[] = [];
+  const lines: string[] = [];
+  for (const l of result.listings.filter((l) => seen.has(l.id)))
+    lines.push(`• already seen: ${describe(l)}`);
   for (const l of fresh) {
     const reason = misplaced
       ? "Outside search area (city not recognized by Facebook)"
       : basicReject(l, w.config);
     if (!reason) {
       accepted.push(l);
+      lines.push(`• checking with Gemini: ${describe(l)}`);
       continue;
     }
+    lines.push(`• filtered (${reason}): ${describe(l)}`);
     await db.saveListing(l);
     await db.process(w.id, l.id, "filtered", { reason });
   }
@@ -589,6 +652,15 @@ async function collectSnapshot(
     repeats: result.listings.length - fresh.length,
     queued: accepted.length,
   });
+  let summary = `📦 Bright Data returned ${result.received} record${result.received === 1 ? "" : "s"}${result.rejected ? ` (${result.rejected} unusable)` : ""}${misplaced ? ` · ⚠️ none in ${wanted}: city not recognized` : ""}`;
+  for (const line of lines) {
+    if (summary.length + line.length > 1800) {
+      await debug(summary);
+      summary = "";
+    }
+    summary += `\n${line}`;
+  }
+  await debug(summary.trim());
 }
 // Connectors for the sources this watch scans now; disabled or unconfigured legs
 // are logged and skipped.
