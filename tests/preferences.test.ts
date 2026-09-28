@@ -68,7 +68,7 @@ test("defaults validate location, radius, delivery and preserve partial updates"
 test("recommendations become editable draft criteria for a both-source watch", () => {
   const result = prepare();
   assert.deepEqual(result.config.sources, ["ebay", "facebook_marketplace"]);
-  assert.equal(result.config.intervalMinutes, 60);
+  assert.equal(result.config.intervalMinutes, 90);
   assert.deepEqual(result.config.location, defaults.location);
   assert.deepEqual(result.config.deliveryModes, ["pickup"]);
   assert.equal(result.config.maxPrice, 85);

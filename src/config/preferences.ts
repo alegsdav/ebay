@@ -74,6 +74,8 @@ export const sourceLabel = (s: SourceId) =>
   s === "ebay" ? "eBay" : "Facebook Marketplace";
 // Marketplace polls ask for few records, so hourly checks stay inside the record budget.
 export const marketplaceMinInterval = 60;
+// Default polling for watches that include Marketplace: ~5 watches fit the free tier.
+export const marketplaceDefaultInterval = 90;
 // Bright Data searches by "City, ST"; a bare ZIP label needs a resolved city.
 export function marketplaceCity(location: z.infer<typeof Location>) {
   return (
@@ -172,7 +174,8 @@ export function prepareWatch(
     channelId: previous?.channelId ?? channel,
     intervalMinutes: Math.max(
       marketplaceMinInterval,
-      previous?.intervalMinutes ?? 60,
+      previous?.intervalMinutes ??
+        (marketplace ? marketplaceDefaultInterval : 60),
     ),
   });
   const notes = proposals.map(
