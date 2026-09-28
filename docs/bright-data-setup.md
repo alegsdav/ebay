@@ -22,9 +22,9 @@ monthly cap, date filter) are listed in `.env.supabase.example`.
 
 Pay-as-you-go is $1.50 per 1,000 records; Bright Data advertises 5,000 free records
 per month. Every returned record is billed, including listings the bot has already
-seen. At the defaults (first search 10 records, then 2 per hourly poll), one watch
-uses about 1,450 records per month; 5 watches at hourly polls would need about 7,200,
-so the default monthly cap of 4,500 stops polling around day 19. Set a monthly spend
+seen. At the defaults (first search 10 records, then 2 per poll every 90 minutes), one
+watch uses about 970 records per month; 5 watches need about 4,850, so the default
+monthly cap of 4,500 may stop polling in the last few days of a month. Set a monthly spend
 limit in the Bright Data dashboard as a backstop, and do not enable auto-recharge.
 
 ## 1. Create and verify the account

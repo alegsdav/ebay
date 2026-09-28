@@ -36,7 +36,7 @@ Core acceptance coverage:
 
 Auctions and Buy It Now are both watched when the watch's `buying` filter allows them; current bids are labeled provisional. Marketplace listings carry verification warnings for deposit, wire-transfer, gift-card, crypto, stock-photo and shipping-only language. These warn; they never block a match or accuse a seller.
 
-Known gaps are deliberate: Bright Data returns results in no guaranteed order, so small hourly polls can miss some new listings; no relist similarity detection, digest or near-end repeat alerts, automatic rule learning or administrator notifications. Credential-dependent live acceptance must be checked on the target accounts before declaring production ready.
+Known gaps are deliberate: Bright Data returns results in no guaranteed order, so small frequent polls can miss some new listings; no relist similarity detection, digest or near-end repeat alerts, automatic rule learning or administrator notifications. Credential-dependent live acceptance must be checked on the target accounts before declaring production ready.
 
 Provider references used for implementation:
 

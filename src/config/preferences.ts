@@ -77,11 +77,27 @@ export const marketplaceMinInterval = 60;
 // Default polling for watches that include Marketplace: ~5 watches fit the free tier.
 export const marketplaceDefaultInterval = 90;
 // Bright Data searches by "City, ST"; a bare ZIP label needs a resolved city.
+// Facebook does not recognize "campbell, ca" (it silently falls back to the
+// provider's own location), so names are title-cased with an upper-case state.
 export function marketplaceCity(location: z.infer<typeof Location>) {
-  return (
-    location.city ?? (/^\d{5}$/.test(location.label) ? null : location.label)
-  );
+  const raw =
+    location.city ?? (/^\d{5}$/.test(location.label) ? null : location.label);
+  if (!raw) return null;
+  const [place, ...rest] = raw.split(",").map((part) => part.trim());
+  const title = place!
+    .toLowerCase()
+    .replace(
+      /(^|[\s'-])(\p{L})/gu,
+      (_, sep: string, ch: string) => sep + ch.toUpperCase(),
+    );
+  const state = rest.join(", ");
+  return state
+    ? `${title}, ${/^[a-z]{2}$/i.test(state) ? state.toUpperCase() : state}`
+    : title;
 }
+// Two-letter state at the end of "City, ST" labels, if any.
+export const stateOf = (label: string | null | undefined) =>
+  /,\s*([a-z]{2})$/i.exec(label?.trim() ?? "")?.[1]?.toUpperCase() ?? null;
 export function prepareWatch(
   parsed: ParsedWatch,
   query: string,

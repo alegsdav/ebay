@@ -16,7 +16,7 @@ import { evaluateMatch, minExtractionConfidence } from "../filters/evaluate.js";
 import { HttpError } from "../connectors/http.js";
 import { log, errorKind } from "../logging.js";
 import { scheduledSources } from "../connectors/source.js";
-import { marketplaceCity } from "../config/preferences.js";
+import { marketplaceCity, stateOf } from "../config/preferences.js";
 const json = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), {
     status,
@@ -216,14 +216,22 @@ export async function processJob(
   }
   if (!c.CLOUD_MONITORING_ENABLED) return;
   const w = await db.watch(job.payload.watchId);
-  // Snapshot records are already paid for, so collect them for any active revision.
+  // Only scans are tied to a revision. Snapshot records are already paid for and
+  // listing jobs are evaluated against the current config, so neither is dropped
+  // (and later re-billed) just because the watch was edited, paused or resumed.
   if (
     !w ||
     !w.active ||
-    (job.kind !== "snapshot" && w.revision !== job.payload.revision)
+    (job.kind === "scan" && w.revision !== job.payload.revision)
   )
     return;
-  const sources = sourceConnectors(w.config, c, db, signal);
+  const sources = sourceConnectors(
+    w.config,
+    c,
+    db,
+    signal,
+    job.kind === "scan",
+  );
   if (job.kind === "scan") return scan(job, w, sources, c, db);
   if (job.kind === "snapshot") return collectSnapshot(job, w, sources, c, db);
   let listing = Listing.parse(job.payload.listing);
@@ -539,9 +547,26 @@ async function collectSnapshot(
         (b.listedAt ? Date.parse(b.listedAt) : 0) -
         (a.listedAt ? Date.parse(a.listedAt) : 0),
     );
+  // If the city was not recognized, Facebook falls back to the provider's own
+  // location: a batch with no listing in the watch's state is not trusted.
+  const wanted = stateOf(
+    w.config.location && marketplaceCity(w.config.location),
+  );
+  const states = fresh
+    .map((l) => stateOf(l.provenance?.locationLabel))
+    .filter((s) => s !== null);
+  const misplaced = !!wanted && states.length > 0 && !states.includes(wanted);
+  if (misplaced)
+    log("brightdata_location_mismatch", {
+      watchId: w.id,
+      wanted,
+      received: [...new Set(states)],
+    });
   const accepted: Listing[] = [];
   for (const l of fresh) {
-    const reason = basicReject(l, w.config);
+    const reason = misplaced
+      ? "Outside search area (city not recognized by Facebook)"
+      : basicReject(l, w.config);
     if (!reason) {
       accepted.push(l);
       continue;
@@ -572,6 +597,7 @@ function sourceConnectors(
   c: CloudConfig,
   db: CloudStore,
   signal: AbortSignal,
+  logSkips = true,
 ) {
   const plan = scheduledSources(w, {
     ebay: !!(
@@ -581,7 +607,8 @@ function sourceConnectors(
     ),
     facebook: c.env.FACEBOOK_MONITORING_ENABLED && !!c.env.BRIGHT_DATA_API_KEY,
   });
-  for (const skip of plan.skipped) log("cloud_source_skipped", skip);
+  if (logSkips)
+    for (const skip of plan.skipped) log("cloud_source_skipped", skip);
   return {
     ebay: plan.scan.includes("ebay")
       ? new EbaySource(

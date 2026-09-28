@@ -622,3 +622,80 @@ test("a failed Marketplace trigger refunds its reserved records", async (t) => {
   assert.equal(state.used, 0);
   assert.equal(state.runs.length, 0);
 });
+test("Marketplace city names are normalized so Facebook recognizes them", async () => {
+  const { marketplaceCity, stateOf } =
+    await import("../src/config/preferences.js");
+  const at = (label: string, city: string | null = null) =>
+    marketplaceCity({ label, postalCode: null, radiusMiles: 5, city });
+  assert.equal(at("campbell, ca"), "Campbell, CA");
+  assert.equal(at("SAN JOSE, ca"), "San Jose, CA");
+  assert.equal(at("97201", "portland, or"), "Portland, OR");
+  assert.equal(at("97201"), null);
+  assert.equal(stateOf("Beaverton, OR"), "OR");
+  assert.equal(stateOf("Portland"), null);
+});
+test("a batch entirely outside the watch's state is treated as an unrecognized city", async (t) => {
+  const bd = brightData(t, {
+    sd_1: [
+      { ...fbRecord("7", "2026-09-27T00:00:00.000Z"), location: "Norfolk, VA" },
+      {
+        ...fbRecord("8", "2026-09-26T00:00:00.000Z"),
+        location: "Portsmouth, VA",
+      },
+    ],
+  });
+  bd.ready();
+  const { db, state } = marketplaceDb();
+  const c = marketplaceWorker();
+  const signal = AbortSignal.timeout(5000);
+  await processJob(job("scan", {}), c, db, signal);
+  assert.equal(bd.triggers[0].input.city, "Portland, OR");
+  const [snap] = state.jobs.splice(0);
+  await processJob(job("snapshot", snap.payload), c, db, signal);
+  assert.equal(state.jobs.length, 0);
+  assert.equal(
+    state.processed.get("facebook_marketplace:brightdata:7"),
+    "filtered",
+  );
+  // A batch with at least one in-state listing is trusted (cross-border metros).
+  const bd2 = brightData(t, {
+    sd_1: [
+      {
+        ...fbRecord("9", "2026-09-27T00:00:00.000Z"),
+        location: "Vancouver, WA",
+      },
+      fbRecord("10", "2026-09-26T00:00:00.000Z"),
+    ],
+  });
+  bd2.ready();
+  const fresh = marketplaceDb();
+  await processJob(job("scan", {}), c, fresh.db, signal);
+  const [snap2] = fresh.state.jobs.splice(0);
+  await processJob(job("snapshot", snap2.payload), c, fresh.db, signal);
+  assert.equal(fresh.state.jobs.length, 2);
+});
+test("queued listings are still evaluated after the watch is edited", async (t) => {
+  const matched = services(t);
+  const a = fakeDb();
+  await processJob(
+    {
+      id: "job",
+      kind: "listing",
+      payload: {
+        watchId: "w",
+        revision: 0,
+        listing: { ...samplePayload().listing, id: "1" },
+      },
+      lease_token: "l",
+      attempts: 1,
+    },
+    worker(),
+    a.db,
+    AbortSignal.timeout(5000),
+  );
+  assert.deepEqual(
+    a.log.processed.map((p) => p.status),
+    ["matched"],
+  );
+  assert.equal(matched.sent.length, 1);
+});

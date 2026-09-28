@@ -87,6 +87,8 @@ export class CloudStore {
         const safeMessages = [
           "Maximum 5 active Marketplace watches. Pause or delete one first.",
           "Marketplace watches require at least 60 minutes between searches.",
+          "Watch changed; create a fresh preview",
+          "Preview expired or unavailable",
         ];
         if (safeMessages.includes(error?.message))
           throw new Error(error.message);

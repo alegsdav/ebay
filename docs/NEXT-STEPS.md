@@ -24,7 +24,7 @@ local SQLite/gateway bot.
 - `/settings` now edits minimum/maximum price, frequency and channel.
   `/watch update` replaces keywords/filters but keeps unstated sources, area and
   price limits.
-- Watches that include Marketplace: at most 5 active (testing cap), checked hourly.
+- Watches that include Marketplace: at most 5 active (testing cap), checked every 90 minutes by default (hourly minimum).
   The first search returns up to 10 current listings; later polls ask for 2 recent
   ones. Listings already seen are never re-notified (but Bright Data still bills them).
 - Existing watches are converted by the new migration: sold-price thresholds are
@@ -58,8 +58,8 @@ local SQLite/gateway bot.
 
 Pay-as-you-go is $1.50 per 1,000 records; Bright Data advertises 5,000 free records per
 month. Every returned record counts, repeats included. At the defaults one watch uses
-about 1,450 records a month (10 on the first search, then 2 per hourly poll); 5 hourly
-watches would need about 7,200. `BRIGHT_DATA_MAX_RECORDS_PER_MONTH` (default 4,500)
+about 970 records a month (10 on the first search, then 2 per poll every 90 minutes);
+5 watches need about 4,850. `BRIGHT_DATA_MAX_RECORDS_PER_MONTH` (default 4,500)
 stops Marketplace polling for the rest of the UTC month once reached.
 
 Search results are not sorted by date and vary between identical searches, so 2 records

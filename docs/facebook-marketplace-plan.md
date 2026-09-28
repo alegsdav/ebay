@@ -18,7 +18,7 @@ list and no manual listing submission. `/listing evaluate` was removed.
   1–6 minutes, so a `scan` job triggers a snapshot and a later `snapshot` job polls
   `/progress` and downloads it. Triggers are never retried automatically.
 - The first search for a watch's keywords and city asks for
-  `BRIGHT_DATA_INITIAL_RECORDS` (10) with no date filter; later hourly polls ask for
+  `BRIGHT_DATA_INITIAL_RECORDS` (10) with no date filter; later polls (every 90 minutes by default) ask for
   `BRIGHT_DATA_POLL_RECORDS` (2) with `date_listed` = `BRIGHT_DATA_RECENT_FILTER`.
   Each run is recorded in `scout_ingestion_runs` with a query key.
 - Bright Data bills every returned record, including listings the bot already saw.
