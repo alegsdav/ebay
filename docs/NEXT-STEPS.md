@@ -31,9 +31,8 @@ local SQLite/gateway bot.
 
 ## What is NOT running yet
 
-- **Not deployed.** The rework is committed to Git only. Production still runs the
-  preferences release (Edge Functions version 5); see
-  [deployment-status.md](deployment-status.md).
+- Deployed September 28, 2026 (migration applied, functions version 6, commands
+  re-registered); see [deployment-status.md](deployment-status.md).
 - **Facebook Marketplace discovery.** `src/connectors/brightdata.ts` is a stub:
   Bright Data's keyword-search request/response shape is not captured yet. Keep
   `FACEBOOK_MONITORING_ENABLED=false`; the Marketplace leg of each watch is skipped
@@ -42,29 +41,13 @@ local SQLite/gateway bot.
 
 ## Your next manual actions
 
-1. **Deploy the rework** (migration and functions together, because new code reads
-   only the new watch shape):
-
-   ```sh
-   npx supabase db push
-   npm run build:cloud
-   npx supabase functions deploy discord-interactions --use-api
-   npx supabase functions deploy scout-worker --use-api
-   npm run register
-   ```
-
-   Then add the new placeholder secrets from `.env.supabase.example`
-   (`BRIGHT_DATA_DATASET_ID`, `BRIGHT_DATA_MAX_CALLS_PER_DAY`) to `.env.supabase` and
-   run `npx supabase secrets set --env-file .env.supabase`. Keep
-   `FACEBOOK_MONITORING_ENABLED=false`. The old fee secrets are now unused and harmless.
-
-2. **Acceptance test in Discord:** `/defaults zipcode:YOUR_ZIP radius:25 delivery:pickup`,
+1. **Acceptance test in Discord:** `/defaults zipcode:YOUR_ZIP radius:25 delivery:pickup`,
    then `/watch create query:lightweight gaming mouse under 20 bucks`. The preview should
    show `eBay + Facebook Marketplace`, a price limit, no category or pricing text, and
    one channel. Confirm, then check `/watch list`, `/settings`, `/watch update`,
    `/watch pause|resume|delete` and `/alert test` (single-tier embed).
 
-3. **Capture the Bright Data contract** (Bright Data now has $5 of usable credit; do not
+2. **Capture the Bright Data contract** (Bright Data now has $5 of usable credit; do not
    add funds or auto-recharge). In the dashboard, open **Web Scraper API → Facebook
    Marketplace → Collect listings by keyword**, and save privately: the dataset ID
    (`BRIGHT_DATA_DATASET_ID`), the generated request with its bearer token removed,

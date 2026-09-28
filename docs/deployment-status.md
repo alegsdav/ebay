@@ -2,33 +2,28 @@
 
 Checked September 28, 2026.
 
-## Git vs. production
+## Deployed now (September 28, 2026)
 
-| Item                         | Status                                                                       |
-| ---------------------------- | ---------------------------------------------------------------------------- |
-| Keyword-watch rework         | Implemented, tested locally, committed and pushed to `origin/main`           |
-| Migration `202609280001_...` | **Not applied** to the production project                                    |
-| Edge Functions               | Production still runs the preferences release, **version 5**                 |
-| Slash commands               | Production still has the old set, including `/listing evaluate`; re-register |
-| Monitoring                   | Off (`CLOUD_MONITORING_ENABLED=false`), dry-run on                           |
-| Facebook Marketplace         | Connector stub only; `FACEBOOK_MONITORING_ENABLED=false`                     |
+| Item                         | Status                                                             |
+| ---------------------------- | ------------------------------------------------------------------ |
+| Keyword-watch rework         | Committed, pushed and deployed                                     |
+| Migration `202609280001_...` | Applied to `xqbbcjnvkpstzjxytusn`                                  |
+| Edge Functions               | `discord-interactions` and `scout-worker` ACTIVE at **version 6**  |
+| Slash commands               | Re-registered; `/listing evaluate` removed, `sources` option added |
+| Monitoring                   | Off (`CLOUD_MONITORING_ENABLED=false`), dry-run on                 |
+| Facebook Marketplace         | Connector stub only; `FACEBOOK_MONITORING_ENABLED` unset (= false) |
+| Secrets                      | Unchanged; new Bright Data variables fall back to defaults         |
 
-A Git push is not a deployment. Deploy the migration and both functions together:
-the new functions parse only the new watch shape, and the old functions cannot read
-converted watches. Steps are in [NEXT-STEPS.md](NEXT-STEPS.md).
-
-## Production (unchanged since September 24, 2026)
-
-- Supabase project: `xqbbcjnvkpstzjxytusn`.
-- Discord application `ebay`, ID `1550254070189793310`, in `test server`,
-  guild ID `1119082301960224930`. No new bot or Supabase project is required.
-- Edge Functions `discord-interactions` and `scout-worker` ACTIVE at version 5.
-  Interactions URL:
+- Supabase project: `xqbbcjnvkpstzjxytusn`. Discord application `ebay`, ID
+  `1550254070189793310`, guild ID `1119082301960224930`. Interactions URL:
   `https://xqbbcjnvkpstzjxytusn.supabase.co/functions/v1/discord-interactions`.
-- Applied migrations: `202609170001_scout.sql`, `202609240001_classifieds.sql`,
-  `202609240002_preferences.sql`.
-- Worker and retention Cron schedules unchanged. `supabase/sql/schedule.sql` does not
-  need re-running for the rework (`scout_cleanup_classifieds()` keeps its name).
+- Applied migrations: `202609170001`, `202609240001`, `202609240002`, `202609280001`.
+- The one existing watch (an older eBay-style watch) was converted: sources
+  `ebay`, maximum price $20, hourly, revision 2. The dropped comparable,
+  submission and evaluation tables were empty.
+- Deployment smoke test: unsigned interactions and anonymous worker calls return
+  HTTP 401 from the new functions, which confirms they booted with production secrets.
+- Cron schedules unchanged; `supabase/sql/schedule.sql` did not need re-running.
 
 ## Local verification of the rework
 
@@ -39,13 +34,12 @@ converted watches. Steps are in [NEXT-STEPS.md](NEXT-STEPS.md).
   defaults and opt-out, update carry-over, the Bright Data stub failing cleanly,
   Marketplace redaction, and Discord payload limits.
 - `npm run demo` and `npm run format:check` pass.
-- Not verified: the migration on the production database, deployed function
-  behavior, live Gemini prompts after the prompt rewrite, and the Discord
+- Not verified: live Gemini prompts after the prompt rewrite and the Discord
   acceptance flow. No live watch, preference or provider request was created.
 
 ## Your next manual step
 
-Deploy per [NEXT-STEPS.md](NEXT-STEPS.md), then run the Discord acceptance flow:
+Run the Discord acceptance flow:
 `/defaults`, `/watch create query:<keywords>` (preview should show both sources, no
 category or pricing text, one channel), `/watch list`, `/settings`, `/watch update`,
 `/watch pause|resume|delete` and `/alert test`.
