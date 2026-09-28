@@ -30,29 +30,25 @@ local SQLite/gateway bot.
 - Existing watches are converted by the new migration: sold-price thresholds are
   dropped and an asking-price or all-in budget becomes the maximum price.
 
-## What is NOT running yet
+## Current state
 
-- Deployed September 28, 2026 (functions version 7); see
-  [deployment-status.md](deployment-status.md).
-- Monitoring is OFF (`CLOUD_MONITORING_ENABLED=false`, `FACEBOOK_MONITORING_ENABLED`
-  unset) and dry-run is ON, so no scheduled searches run yet.
+- Deployed and **live** since September 28, 2026: monitoring on, dry-run off, so
+  matching Marketplace listings are pinged in the watch's channel.
 - eBay has no API credentials, so eBay legs are skipped until you add them.
+- Bright Data needs cities with full state names ("Campbell, California"); the bot
+  converts "Campbell, CA" automatically. Results cover roughly the whole metro area,
+  not the exact radius.
+- Facebook's keyword search is fuzzy: a "lofree flow keyboard" search returns many
+  generic keyboards. Gemini rejects those, so pings only come for real matches.
 
 ## Your next manual actions
 
-1. Set your test watch to hourly: `/settings id:218b0758-79e8-4235-88cb-1e9f86b56c56 frequency:60`
-   (it was created under the old daily rule). If your `/defaults` uses a ZIP, re-run
-   `/defaults zipcode:<ZIP>` once so the bot stores the matching city.
+1. Watch your alert channel. If a ping is not what you want, press **Not relevant**
+   and tighten the watch with `/watch update`.
 2. Set a monthly spend limit in the Bright Data dashboard as a backstop; do not enable
    auto-recharge.
-3. Turn monitoring on (ask the assistant, or run these), first with dry-run so matches
-   are only logged:
-
-   ```sh
-   npx supabase secrets set CLOUD_MONITORING_ENABLED=true FACEBOOK_MONITORING_ENABLED=true
-   ```
-
-   After a clean hour of logs, `npx supabase secrets set DRY_RUN=false` to receive pings.
+3. To pause everything: `npx supabase secrets set CLOUD_MONITORING_ENABLED=false`, or
+   `/watch pause` for one watch.
 
 ## Budget
 

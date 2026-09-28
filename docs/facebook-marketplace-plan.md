@@ -35,7 +35,11 @@ list and no manual listing submission. `/listing evaluate` was removed.
 - Watches that include Marketplace: at most 5 active (testing cap), hourly minimum.
 
 Observed in live tests (2026-09-28): a city without a state ("Portland") matched a
-different region; "Portland, OR" with a radius returned Portland-area listings.
+different region; "Portland, OR" returned Portland-area listings, but "Campbell, CA"
+was not recognized (results fell back to Virginia) while "Campbell, California"
+worked, so the connector sends full state names (`providerCity()`). An unrecognized
+city is detected when no listing in a batch is in the watch's state. `radius` is
+applied loosely (metro-area results).
 Identical searches returned different listings each time, not sorted by date, and
 "Last 24 hours" still returned older listings. Small polls may therefore miss some
 new listings; the discover-by-URL mode (which could sort newest first) was rejected
