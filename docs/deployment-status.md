@@ -2,44 +2,49 @@
 
 Checked September 28, 2026.
 
-## Deployed now (September 28, 2026)
+## Deployed now
 
-| Item                         | Status                                                             |
-| ---------------------------- | ------------------------------------------------------------------ |
-| Keyword-watch rework         | Committed, pushed and deployed                                     |
-| Migration `202609280001_...` | Applied to `xqbbcjnvkpstzjxytusn`                                  |
-| Edge Functions               | `discord-interactions` and `scout-worker` ACTIVE at **version 6**  |
-| Slash commands               | Re-registered; `/listing evaluate` removed, `sources` option added |
-| Monitoring                   | Off (`CLOUD_MONITORING_ENABLED=false`), dry-run on                 |
-| Facebook Marketplace         | Connector stub only; `FACEBOOK_MONITORING_ENABLED` unset (= false) |
-| Secrets                      | Unchanged; new Bright Data variables fall back to defaults         |
+| Item                  | Status                                                                         |
+| --------------------- | ------------------------------------------------------------------------------ |
+| Code                  | `main` at the Bright Data polling release, committed, pushed and deployed      |
+| Migrations            | All five applied, through `202609290001_marketplace_polling.sql`               |
+| Edge Functions        | `discord-interactions` and `scout-worker` ACTIVE at **version 7**              |
+| Slash commands        | Registered (unchanged in the polling release)                                  |
+| `BRIGHT_DATA_API_KEY` | Uploaded to Supabase secrets                                                   |
+| Monitoring            | **Off**: `CLOUD_MONITORING_ENABLED=false`, `FACEBOOK_MONITORING_ENABLED` unset |
+| Dry-run               | On (`DRY_RUN=true`)                                                            |
+| eBay                  | No credentials yet; eBay legs are skipped (`ebay_not_configured`)              |
 
 - Supabase project: `xqbbcjnvkpstzjxytusn`. Discord application `ebay`, ID
   `1550254070189793310`, guild ID `1119082301960224930`. Interactions URL:
   `https://xqbbcjnvkpstzjxytusn.supabase.co/functions/v1/discord-interactions`.
-- Applied migrations: `202609170001`, `202609240001`, `202609240002`, `202609280001`.
-- The one existing watch (an older eBay-style watch) was converted: sources
-  `ebay`, maximum price $20, hourly, revision 2. The dropped comparable,
-  submission and evaluation tables were empty.
-- Deployment smoke test: unsigned interactions and anonymous worker calls return
-  HTTP 401 from the new functions, which confirms they booted with production secrets.
-- Cron schedules unchanged; `supabase/sql/schedule.sql` did not need re-running.
+- Verified in production: `snapshot` job kind, `scout_take_monthly_budget`,
+  `scout_ingestion_runs.query_key`, and the 5-watch Marketplace cap. Unauthenticated
+  calls to both functions return HTTP 401.
+- Active watches: an eBay-only "Wireless Gaming Mouse" (hourly) and "Lofree Flow
+  Keyboard" (eBay + Marketplace, Campbell, CA, 5 miles, still at the old daily
+  1440-minute interval).
+- Cron schedules unchanged.
 
-## Local verification of the rework
+## Live Bright Data tests (September 28, 2026)
 
-- `npm run check`: typecheck, all tests, TypeScript build and both Edge Function
-  bundles pass. Tests cover the new migration against PGlite (watch conversion,
-  dropped tables, re-keyed normalization cache, feedback values, grants), per-source
-  scanning with Marketplace disabled, match/no-match listing jobs, both-source
-  defaults and opt-out, update carry-over, the Bright Data stub failing cleanly,
-  Marketplace redaction, and Discord payload limits.
-- `npm run demo` and `npm run format:check` pass.
-- Not verified: live Gemini prompts after the prompt rewrite and the Discord
-  acceptance flow. No live watch, preference or provider request was created.
+Four capped requests (about 9 billed records): keyword search requires `city`;
+"Portland" alone matched another region; "Portland, OR" with `radius` returned
+Portland-area listings; an identical repeat returned three different listings, not
+sorted by date, some older than the "Last 24 hours" filter. Discover-by-URL was
+rejected for this account.
+
+## Local verification
+
+`npm run check` (38 tests, TypeScript build, both bundles), `npm run format:check`
+and `npm run demo` pass. Tests cover the trigger/progress/download request shapes,
+record mapping and redaction, the first-search/hourly-poll cycle with repeat skipping,
+monthly budget reserve/refund/stop, single-attempt triggers, the polling migration
+against PGlite, and ZIP-to-city `/defaults`.
+
+Not yet verified in production: a scheduled Marketplace poll end to end, because
+monitoring is off.
 
 ## Your next manual step
 
-Run the Discord acceptance flow:
-`/defaults`, `/watch create query:<keywords>` (preview should show both sources, no
-category or pricing text, one channel), `/watch list`, `/settings`, `/watch update`,
-`/watch pause|resume|delete` and `/alert test`.
+Decide when to turn monitoring on (see [NEXT-STEPS.md](NEXT-STEPS.md)).

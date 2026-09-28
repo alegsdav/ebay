@@ -24,47 +24,44 @@ local SQLite/gateway bot.
 - `/settings` now edits minimum/maximum price, frequency and channel.
   `/watch update` replaces keywords/filters but keeps unstated sources, area and
   price limits.
-- Watches that include Marketplace: at most 10 active deployment-wide and at most
-  daily. Since Marketplace is on by default, pick `eBay only` for hourly watches.
+- Watches that include Marketplace: at most 5 active (testing cap), checked hourly.
+  The first search returns up to 10 current listings; later polls ask for 2 recent
+  ones. Listings already seen are never re-notified (but Bright Data still bills them).
 - Existing watches are converted by the new migration: sold-price thresholds are
   dropped and an asking-price or all-in budget becomes the maximum price.
 
 ## What is NOT running yet
 
-- Deployed September 28, 2026 (migration applied, functions version 6, commands
-  re-registered); see [deployment-status.md](deployment-status.md).
-- **Facebook Marketplace discovery.** `src/connectors/brightdata.ts` is a stub:
-  Bright Data's keyword-search request/response shape is not captured yet. Keep
-  `FACEBOOK_MONITORING_ENABLED=false`; the Marketplace leg of each watch is skipped
-  and its eBay leg runs normally.
-- Monitoring stays OFF (`CLOUD_MONITORING_ENABLED=false`) and dry-run stays ON.
+- Deployed September 28, 2026 (functions version 7); see
+  [deployment-status.md](deployment-status.md).
+- Monitoring is OFF (`CLOUD_MONITORING_ENABLED=false`, `FACEBOOK_MONITORING_ENABLED`
+  unset) and dry-run is ON, so no scheduled searches run yet.
+- eBay has no API credentials, so eBay legs are skipped until you add them.
 
 ## Your next manual actions
 
-1. **Acceptance test in Discord:** `/defaults zipcode:YOUR_ZIP radius:25 delivery:pickup`,
-   then `/watch create query:lightweight gaming mouse under 20 bucks`. The preview should
-   show `eBay + Facebook Marketplace`, a price limit, no category or pricing text, and
-   one channel. Confirm, then check `/watch list`, `/settings`, `/watch update`,
-   `/watch pause|resume|delete` and `/alert test` (single-tier embed).
+1. Set your test watch to hourly: `/settings id:218b0758-79e8-4235-88cb-1e9f86b56c56 frequency:60`
+   (it was created under the old daily rule). If your `/defaults` uses a ZIP, re-run
+   `/defaults zipcode:<ZIP>` once so the bot stores the matching city.
+2. Set a monthly spend limit in the Bright Data dashboard as a backstop; do not enable
+   auto-recharge.
+3. Turn monitoring on (ask the assistant, or run these), first with dry-run so matches
+   are only logged:
 
-2. **Capture the Bright Data contract** (Bright Data now has $5 of usable credit; do not
-   add funds or auto-recharge). In the dashboard, open **Web Scraper API → Facebook
-   Marketplace → Collect listings by keyword**, and save privately: the dataset ID
-   (`BRIGHT_DATA_DATASET_ID`), the generated request with its bearer token removed,
-   and one small redacted sample response. Run the smallest result count only. See
-   [bright-data-setup.md](bright-data-setup.md).
+   ```sh
+   npx supabase secrets set CLOUD_MONITORING_ENABLED=true FACEBOOK_MONITORING_ENABLED=true
+   ```
 
-Share the sanitized request and sample response. The next engineering step is the
-real `BrightDataSource.search()` against that contract, then a narrow dry-run test
-watch with `FACEBOOK_MONITORING_ENABLED=true`.
+   After a clean hour of logs, `npx supabase secrets set DRY_RUN=false` to receive pings.
 
-## Free-tier sizing
+## Budget
 
-[Bright Data's Marketplace page](https://brightdata.com/products/web-scraper/facebook/marketplace)
-advertises free records per month; this is not a count of searches, and credits may
-be shared with other Bright Data products. Confirm the actual balance in your account.
+Pay-as-you-go is $1.50 per 1,000 records; Bright Data advertises 5,000 free records per
+month. Every returned record counts, repeats included. At the defaults one watch uses
+about 1,450 records a month (10 on the first search, then 2 per hourly poll); 5 hourly
+watches would need about 7,200. `BRIGHT_DATA_MAX_RECORDS_PER_MONTH` (default 4,500)
+stops Marketplace polling for the rest of the UTC month once reached.
 
-Proposed steady-state allocation: **10 watches × 15 returned records × 31 days =
-4,650 records/month**. A strict record budget must stop requests before the allowance
-or credit is exhausted, including test traffic and retries. The per-day call cap
-(`BRIGHT_DATA_MAX_CALLS_PER_DAY`, default 10) is a coarse guard, not a record budget.
+Search results are not sorted by date and vary between identical searches, so 2 records
+per hour may miss some new listings. If that happens, raise `BRIGHT_DATA_POLL_RECORDS`
+or ask Bright Data to enable discover-by-URL (search URL sorted newest first).
