@@ -540,7 +540,7 @@ test("Marketplace polling: first search shows current listings, later hourly pol
       limit: "10",
       input: {
         keyword: "wireless gaming mouse",
-        city: "Portland, OR",
+        city: "Portland, Oregon",
         radius: 25,
         date_listed: "",
       },
@@ -578,7 +578,7 @@ test("Marketplace polling: first search shows current listings, later hourly pol
     limit: "2",
     input: {
       keyword: "wireless gaming mouse",
-      city: "Portland, OR",
+      city: "Portland, Oregon",
       radius: 25,
       date_listed: "Last 24 hours",
     },
@@ -649,7 +649,7 @@ test("a batch entirely outside the watch's state is treated as an unrecognized c
   const c = marketplaceWorker();
   const signal = AbortSignal.timeout(5000);
   await processJob(job("scan", {}), c, db, signal);
-  assert.equal(bd.triggers[0].input.city, "Portland, OR");
+  assert.equal(bd.triggers[0].input.city, "Portland, Oregon");
   const [snap] = state.jobs.splice(0);
   await processJob(job("snapshot", snap.payload), c, db, signal);
   assert.equal(state.jobs.length, 0);
@@ -698,4 +698,13 @@ test("queued listings are still evaluated after the watch is edited", async (t) 
     ["matched"],
   );
   assert.equal(matched.sent.length, 1);
+});
+test("Bright Data receives full state names; unknown or foreign regions pass through", async () => {
+  const { providerCity } = await import("../src/connectors/brightdata.js");
+  const at = (label: string) =>
+    providerCity({ label, postalCode: null, radiusMiles: 5, city: null });
+  assert.equal(at("campbell, ca"), "Campbell, California");
+  assert.equal(at("Washington, DC"), "Washington, District of Columbia");
+  assert.equal(at("Springfield"), "Springfield");
+  assert.equal(at("97201"), null);
 });

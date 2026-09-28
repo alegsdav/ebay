@@ -9,7 +9,7 @@ import {
 } from "./discord.js";
 import { LlmClient, PROMPT_VERSION } from "../llm/client.js";
 import { EbaySource } from "../connectors/ebay.js";
-import { BrightDataSource } from "../connectors/brightdata.js";
+import { BrightDataSource, providerCity } from "../connectors/brightdata.js";
 import { Listing, type WatchConfig } from "../config/schema.js";
 import { basicReject } from "../filters/matches.js";
 import { evaluateMatch, minExtractionConfidence } from "../filters/evaluate.js";
@@ -426,7 +426,7 @@ async function startSnapshot(
 ) {
   const queryKey = await digest({
     searchTerms: w.config.searchTerms,
-    city: w.config.location && marketplaceCity(w.config.location),
+    city: w.config.location && providerCity(w.config.location),
     radius: w.config.location?.radiusMiles,
   });
   const initial = !(

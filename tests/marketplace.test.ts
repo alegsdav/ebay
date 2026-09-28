@@ -90,7 +90,7 @@ test("disabled, unconfigured or city-less legs are skipped per watch, not the wh
           ...area,
           label: "97201",
           postalCode: "97201",
-          city: "Portland, OR",
+          city: "Portland, Oregon",
         },
       },
       { facebook: true },
@@ -147,7 +147,7 @@ const portland: WatchConfig = {
     label: "97201",
     postalCode: "97201",
     radiusMiles: 25,
-    city: "Portland, OR",
+    city: "Portland, Oregon",
   },
 };
 test("Bright Data connector triggers a capped keyword search, polls and maps records", async (t) => {
@@ -194,7 +194,7 @@ test("Bright Data connector triggers a capped keyword search, polls and maps rec
     input: [
       {
         keyword: "gaming mouse",
-        city: "Portland, OR",
+        city: "Portland, Oregon",
         radius: 25,
         date_listed: "",
       },

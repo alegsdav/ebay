@@ -133,6 +133,67 @@ export async function mapBrightDataRecord(r: any, retrievedAt = new Date()) {
     retrievedAt,
   );
 }
+const states: Record<string, string> = {
+  AL: "Alabama",
+  AK: "Alaska",
+  AZ: "Arizona",
+  AR: "Arkansas",
+  CA: "California",
+  CO: "Colorado",
+  CT: "Connecticut",
+  DE: "Delaware",
+  DC: "District of Columbia",
+  FL: "Florida",
+  GA: "Georgia",
+  HI: "Hawaii",
+  ID: "Idaho",
+  IL: "Illinois",
+  IN: "Indiana",
+  IA: "Iowa",
+  KS: "Kansas",
+  KY: "Kentucky",
+  LA: "Louisiana",
+  ME: "Maine",
+  MD: "Maryland",
+  MA: "Massachusetts",
+  MI: "Michigan",
+  MN: "Minnesota",
+  MS: "Mississippi",
+  MO: "Missouri",
+  MT: "Montana",
+  NE: "Nebraska",
+  NV: "Nevada",
+  NH: "New Hampshire",
+  NJ: "New Jersey",
+  NM: "New Mexico",
+  NY: "New York",
+  NC: "North Carolina",
+  ND: "North Dakota",
+  OH: "Ohio",
+  OK: "Oklahoma",
+  OR: "Oregon",
+  PA: "Pennsylvania",
+  RI: "Rhode Island",
+  SC: "South Carolina",
+  SD: "South Dakota",
+  TN: "Tennessee",
+  TX: "Texas",
+  UT: "Utah",
+  VT: "Vermont",
+  VA: "Virginia",
+  WA: "Washington",
+  WV: "West Virginia",
+  WI: "Wisconsin",
+  WY: "Wyoming",
+};
+// Live tests: "Campbell, CA" was not recognized (results fell back to Virginia),
+// while "Campbell, California" returned Bay Area listings. Send full state names.
+export function providerCity(location: NonNullable<WatchConfig["location"]>) {
+  const city = marketplaceCity(location);
+  if (!city) return null;
+  const m = /^(.*),\s*([A-Z]{2})$/.exec(city);
+  return m && states[m[2]!] ? `${m[1]}, ${states[m[2]!]}` : city;
+}
 export type SnapshotStatus =
   "starting" | "running" | "ready" | "failed" | "canceled";
 // Bright Data keyword discovery is asynchronous (1–6 minutes per search): the worker
@@ -205,7 +266,7 @@ export class BrightDataSource implements SnapshotSourceConnector {
           input: [
             {
               keyword: watch.searchTerms,
-              city: marketplaceCity(watch.location!),
+              city: providerCity(watch.location!),
               radius: watch.location!.radiusMiles,
               date_listed: opts.recentOnly
                 ? this.env.BRIGHT_DATA_RECENT_FILTER
