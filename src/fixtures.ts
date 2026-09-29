@@ -8,10 +8,6 @@ import {
 import { evaluateMatch } from "./filters/evaluate.js";
 import type { CloudAlert } from "./cloud/discord.js";
 export const parsed: ParsedWatch = {
-  sources: null,
-  location: null,
-  deliveryModes: null,
-  estimatedTravelCost: null,
   name: "Wireless gaming mice",
   searchTerms: "wireless gaming mouse",
   excludedKeywords: [],
@@ -33,10 +29,6 @@ export const watch: WatchConfig = {
   excludedKeywords: ["for parts", "broken"],
   constraints: parsed.constraints,
   conditions: parsed.conditions,
-  sources: ["ebay"],
-  location: null,
-  deliveryModes: null,
-  estimatedTravelCost: 0,
   minPrice: null,
   maxPrice: 85,
   minSellerPercent: null,

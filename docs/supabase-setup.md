@@ -6,11 +6,11 @@ Supabase is the primary hosted deployment target. The repository includes Postgr
 
 ```text
 Discord → signed HTTPS interaction → PostgreSQL job queue → Edge Function worker
-Supabase Cron → worker pulses → due watches → per-source keyword search → listing jobs
+Supabase Cron → worker pulses → due watches → eBay keyword search → listing jobs
 Listing job → fresh listing detail → Gemini extraction → keyword/attribute match → Discord alert
 ```
 
-Supabase is the only deployment target; there is no local gateway bot or local database. The offline demo (`npm run demo`) exercises the match pipeline with synthetic data and no network. Each watch scans eBay and/or Facebook Marketplace; a disabled source is skipped for that watch without blocking the other.
+Supabase is the only deployment target; there is no local gateway bot or local database. The offline demo (`npm run demo`) exercises the match pipeline with synthetic data and no network.
 
 The worker handles **one durable job per invocation**, with an application deadline of 95 seconds. Supabase documents a 150-second Free-plan wall-clock limit and a separate 2-second CPU limit. The design spends most runtime waiting for APIs, but actual deployed CPU and latency must still be observed. [Runtime limits](https://supabase.com/docs/guides/functions/limits).
 
@@ -42,7 +42,7 @@ The CLI login opens its account authorization flow. Linking may ask for the data
 npx supabase db push
 ```
 
-This applies pending migrations in filename order to the linked project. `202609280001_keyword_watch.sql` converts existing watches to the keyword-watch shape (sold-price thresholds are dropped; an asking-price or all-in budget becomes the maximum listing price), removes the comparable, manual-submission and evaluation tables, re-keys the normalization cache and discards open previews. The tables are named `scout_*`. RLS is enabled and ordinary anonymous/authenticated clients have no table or RPC access; only server code using the service role can access them. Discord user/server ownership is checked by the application, and confirmation is atomic in PostgreSQL.
+This applies pending migrations in filename order to the linked project. The migrations end with `202609300001_remove_marketplace.sql`, which removes the former Facebook Marketplace tables, functions and data and converts watches to eBay-only. The tables are named `scout_*`. RLS is enabled and ordinary anonymous/authenticated clients have no table or RPC access; only server code using the service role can access them. Discord user/server ownership is checked by the application, and confirmation is atomic in PostgreSQL.
 
 If you prefer the SQL Editor, run each unapplied migration once in filename order. Choose one approach and keep migration history consistent; do not execute the same create-table migration twice. Existing deployments need only the new migration, rebuilt functions, updated Discord command registration and the revised schedule.
 
@@ -67,7 +67,6 @@ Put the generated random value into `WORKER_SECRET` in `.env.supabase`. Keep it 
 | `EBAY_CLIENT_ID`, `EBAY_CLIENT_SECRET` | Your matching eBay developer keyset                            |
 | `EBAY_POSTAL_CODE`                     | US delivery ZIP                                                |
 | `EBAY_ENV`                             | Start with `sandbox`; production only after appropriate access |
-| `FACEBOOK_MONITORING_ENABLED`          | Keep `false` until the Bright Data connector is implemented    |
 
 Keep `CLOUD_MONITORING_ENABLED=false` and `DRY_RUN=true` for initial Discord setup. You can leave eBay/Gemini keys blank for `/alert test`; creating a natural-language watch requires Gemini.
 
@@ -120,13 +119,13 @@ Four pulses per minute are approximately **172,800 function invocations per 30 d
 
 ## 8. Enable monitoring, then alerts
 
-1. Confirm permitted marketplace access and populate the matching eBay keys.
+1. Confirm permitted eBay access and populate the matching keys, then run `npm run check:ebay`.
 2. Set `CLOUD_MONITORING_ENABLED=true` in `.env.supabase`; keep `DRY_RUN=true`.
 3. Upload the secrets again. Supabase uses updated secrets for subsequent invocations; if an old isolate appears to retain values, redeploy the functions.
 4. Create and confirm a narrow watch. Inspect worker logs, `scout_jobs` and `scout_processing` after the next Cron pulse.
 5. When results look right, set `DRY_RUN=false` and upload secrets again.
 
-Watches that include Facebook Marketplace (the default) are limited to 5 active across the deployment and run at most hourly. Each Marketplace poll triggers a Bright Data snapshot that a later `snapshot` job collects. `BRIGHT_DATA_MAX_RECORDS_PER_MONTH` caps billed records per UTC month. While `FACEBOOK_MONITORING_ENABLED=false` or `BRIGHT_DATA_API_KEY` is unset, the Marketplace leg is skipped and logged as `cloud_source_skipped`; the eBay leg is skipped the same way until eBay credentials are set.
+Without eBay credentials (`EBAY_CLIENT_ID`, `EBAY_CLIENT_SECRET`, `EBAY_POSTAL_CODE`), scans do nothing and log `cloud_scan_skipped`. `DEBUG_CHANNEL_ID` posts each search summary and every listing decision to a Discord channel.
 
 ## Health, storage and recovery
 

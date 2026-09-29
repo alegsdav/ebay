@@ -17,7 +17,6 @@ select cron.schedule('scout-worker-pulse','* * * * *',$job$
 $job$);
 -- Retain operational evidence while bounding short-lived queue/token storage.
 select cron.schedule('scout-retention','17 3 * * *',$job$
-  select public.scout_cleanup_classifieds();
   delete from public.scout_drafts where expires_at<now();
   delete from public.scout_jobs where status in ('done','dead') and finished_at<now()-interval '7 days';
   delete from public.scout_usage where day<current_date-90;

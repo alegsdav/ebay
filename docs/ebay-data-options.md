@@ -14,12 +14,13 @@ The published default Browse allowance is 5,000 calls/day for methods other than
 
 1. Join the [eBay Developers Program](https://developer.ebay.com/) and complete account verification.
 2. Create a sandbox keyset and, when available, a production keyset.
-3. Set `EBAY_CLIENT_ID` to the App ID/client ID and `EBAY_CLIENT_SECRET` to the Cert ID/client secret. Keep the environment and matching keyset together.
-4. Set `EBAY_POSTAL_CODE` to your US delivery ZIP so shipping costs shown in alerts have a destination.
-5. Start with `EBAY_ENV=sandbox`. Sandbox listings are test data, not items to purchase.
-6. Read the Buy API production requirements and request approval/clarification for your app where required. Describe: “A read-only, private Discord listing monitor with human review; no bidding, checkout or payment handling; marketplace text is normalized using an external LLM.” Ask whether your intended retention, LLM processing and alert display are permitted under your agreement.
-7. After access is approved, switch to `EBAY_ENV=production`, use production credentials, and run a narrow watch in dry-run.
-8. Leave `EBAY_ALLOW_AUCTIONS=false` until you have confirmed auction access for your integration. With it enabled, a watch whose `buying` filter is `auction` or `both` also watches auctions. The code has no purchasing or bidding endpoint regardless of this flag.
+3. Set `EBAY_CLIENT_ID` to the **App ID** (client ID) and `EBAY_CLIENT_SECRET` to the **Cert ID** (client secret). The **Dev ID** is not used by this bot. Keep the environment and matching keyset together: sandbox keys only work with `EBAY_ENV=sandbox`, production keys only with `EBAY_ENV=production`.
+4. Run `npm run check:ebay -- <keywords>` to confirm the keys fetch a token and return listings before enabling monitoring.
+5. Set `EBAY_POSTAL_CODE` to your US delivery ZIP so shipping costs shown in alerts have a destination.
+6. Start with `EBAY_ENV=sandbox`. Sandbox listings are test data, not items to purchase.
+7. Read the Buy API production requirements and request approval/clarification for your app where required. Describe: “A read-only, private Discord listing monitor with human review; no bidding, checkout or payment handling; marketplace text is normalized using an external LLM.” Ask whether your intended retention, LLM processing and alert display are permitted under your agreement.
+8. After access is approved, switch to `EBAY_ENV=production`, use production credentials, and run a narrow watch in dry-run.
+9. Leave `EBAY_ALLOW_AUCTIONS=false` until you have confirmed auction access for your integration. With it enabled, a watch whose `buying` filter is `auction` or `both` also watches auctions. The code has no purchasing or bidding endpoint regardless of this flag.
 
 ## Third-party alternatives
 

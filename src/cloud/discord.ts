@@ -1,7 +1,6 @@
 import { HttpError } from "../connectors/http.js";
 import type { Listing, Normalized, WatchConfig } from "../config/schema.js";
 import type { MatchResult } from "../filters/evaluate.js";
-import { sourceLabel, marketplaceCity } from "../config/preferences.js";
 export interface Interaction {
   id: string;
   application_id: string;
@@ -186,31 +185,17 @@ export function preview(
   config: WatchConfig,
   id: string,
   notes: string[] = [],
-  facebookEnabled = false,
 ): Message {
-  const marketplace = config.sources.includes("facebook_marketplace");
   return {
     content:
       [
         `**Review ${clean(config.name)}**`,
-        `Keywords: ${clean(config.searchTerms)} · US/USD`,
-        `Sources: ${config.sources.map(sourceLabel).join(" + ")}`,
+        `eBay keywords: ${clean(config.searchTerms)} · US/USD`,
         `Price: ${priceRange(config)} · conditions ${config.conditions.join(", ")} · ${config.buying}`,
         `Excluding: ${clean(config.excludedKeywords.join(", ") || "none")}`,
         `Criteria: ${clean(config.constraints.map((c) => `${c.key} ${c.operator} ${c.value}`).join("; ") || "none")}`,
         ...(config.minSellerPercent !== null
-          ? [`eBay seller rating ≥ ${config.minSellerPercent}%`]
-          : []),
-        ...(marketplace
-          ? [
-              `Marketplace: near ${clean((config.location && marketplaceCity(config.location)) ?? "unset")} · ${config.location?.radiusMiles} miles · ${config.deliveryModes?.join(" / ")}`,
-              "Marketplace: first check shows current listings; later checks look for newly listed ones.",
-              ...(facebookEnabled
-                ? []
-                : [
-                    "Facebook Marketplace searching is turned off right now; that leg is skipped until it is enabled.",
-                  ]),
-            ]
+          ? [`Seller rating ≥ ${config.minSellerPercent}%`]
           : []),
         ...notes
           .filter((n) => n.startsWith("Confirm recommendation:"))
@@ -267,16 +252,13 @@ export const feedbackActions = {
 } as const;
 export function alertMessage(p: CloudAlert, id: string): Message {
   const { listing: l, normalized: n, match: m, config: w } = p;
-  const marketplace = l.source === "facebook_marketplace";
   const keys = new Set(w.constraints.map((c) => c.key));
   const shown = keys.size
     ? n.attributes.filter((a) => keys.has(a.key))
     : n.attributes;
   const shipping =
     l.shipping === null
-      ? marketplace
-        ? ""
-        : " · shipping unknown"
+      ? " · shipping unknown"
       : l.shipping === 0
         ? " · free shipping"
         : ` + ${money(l.shipping)} shipping`;
@@ -285,10 +267,9 @@ export function alertMessage(p: CloudAlert, id: string): Message {
       {
         title: `MATCH · ${clean(l.title).slice(0, 200)}`,
         url: l.url,
-        color: marketplace ? 0x1877f2 : 0xe53238,
+        color: 0xe53238,
         description: clean(n.explanation).slice(0, 700) || undefined,
         fields: [
-          { name: "Source", value: sourceLabel(l.source), inline: true },
           {
             name: l.auction ? "Current bid — provisional" : "Price",
             value: `${money(l.price)}${shipping}`,
@@ -307,19 +288,10 @@ export function alertMessage(p: CloudAlert, id: string): Message {
                 900,
               ) || "None extracted",
           },
-          ...(marketplace
-            ? [
-                {
-                  name: "Location / pickup",
-                  value: `${clean(l.provenance?.locationLabel ?? "unknown").slice(0, 200)} · ${l.provenance?.deliveryModes.join(" / ") ?? "pickup"}${w.estimatedTravelCost > 0 ? ` · your travel estimate ${money(w.estimatedTravelCost)}` : ""}`,
-                },
-              ]
-            : [
-                {
-                  name: "Seller",
-                  value: `${clean(l.sellerName).slice(0, 100)} · ${l.sellerPercent ?? "unknown"}% positive · ${l.sellerFeedback ?? "unknown"} feedback`,
-                },
-              ]),
+          {
+            name: "Seller",
+            value: `${clean(l.sellerName).slice(0, 100)} · ${l.sellerPercent ?? "unknown"}% positive · ${l.sellerFeedback ?? "unknown"} feedback`,
+          },
           ...(l.listedAt
             ? [
                 {

@@ -10,30 +10,6 @@ export const Condition = z.enum([
 ]);
 const text = z.string().trim().min(1).max(200);
 const money = z.number().finite().min(0).max(10000000);
-export const SourceId = z.enum(["ebay", "facebook_marketplace"]);
-export type SourceId = z.infer<typeof SourceId>;
-export const Location = z
-  .object({
-    label: text.refine(
-      (s) =>
-        !/\b\d{1,6}\s+(?:[\w.-]+\s+){1,5}(street|st|avenue|ave|road|rd|drive|dr|lane|ln|court|ct|way|boulevard|blvd)\b|[-+]?\d{1,3}\.\d+\s*[, ]\s*[-+]?\d{1,3}\.\d+/i.test(
-          s,
-        ),
-      "Use a city or postal area, not a street address or coordinates",
-    ),
-    postalCode: z
-      .string()
-      .regex(/^\d{5}$/)
-      .nullable(),
-    radiusMiles: z.number().min(1).max(100),
-    // "City, ST" for Facebook Marketplace search; derived from a ZIP when needed.
-    city: text.nullable().optional(),
-  })
-  .strict();
-export const DeliveryModes = z
-  .array(z.enum(["pickup", "shipping"]))
-  .min(1)
-  .max(2);
 export const Attribute = z.object({ key: text, value: text }).strict();
 export const Constraint = z
   .object({
@@ -52,10 +28,6 @@ export const ParsedWatch = z
       )
       .max(5)
       .optional(),
-    sources: z.array(SourceId).min(1).max(2).nullable(),
-    location: Location.nullable(),
-    deliveryModes: DeliveryModes.nullable(),
-    estimatedTravelCost: money.nullable(),
     name: z.string().min(1).max(80),
     searchTerms: z.string().min(1).max(150),
     excludedKeywords: z.array(text).max(30),
@@ -85,15 +57,9 @@ export const WatchConfig = z
     excludedKeywords: z.array(text),
     constraints: z.array(Constraint),
     conditions: z.array(Condition).min(1),
-    // One watch searches every listed source; a user can opt out of either one.
-    sources: z.array(SourceId).min(1).max(2),
-    // Facebook Marketplace only.
-    location: Location.nullable(),
-    deliveryModes: DeliveryModes.nullable(),
-    estimatedTravelCost: money,
     minPrice: money.nullable(),
     maxPrice: money.nullable(),
-    // eBay only; a quality filter, applied only when the watch sets it.
+    // A quality filter, applied only when the watch sets it.
     minSellerPercent: z.number().min(0).max(100).nullable(),
     country: z.literal("US"),
     currency: z.literal("USD"),
@@ -106,10 +72,6 @@ export const WatchConfig = z
     (w) =>
       w.minPrice === null || w.maxPrice === null || w.minPrice <= w.maxPrice,
     "Minimum price exceeds maximum",
-  )
-  .refine(
-    (w) => new Set(w.sources).size === w.sources.length,
-    "Duplicate sources",
   );
 export type WatchConfig = z.infer<typeof WatchConfig>;
 export const Normalized = z
@@ -132,21 +94,16 @@ export type Normalized = z.infer<typeof Normalized>;
 export const Listing = z
   .object({
     id: text,
-    source: SourceId,
+    source: z.literal("ebay"),
     url: z.url().refine((u) => {
       const x = new URL(u);
       return (
         x.protocol === "https:" &&
         !x.username &&
         !x.password &&
-        (x.hostname === "ebay.com" ||
-          x.hostname.endsWith(".ebay.com") ||
-          (["www.facebook.com", "facebook.com", "m.facebook.com"].includes(
-            x.hostname,
-          ) &&
-            /^\/marketplace\/item\/\d+\/?$/.test(x.pathname)))
+        (x.hostname === "ebay.com" || x.hostname.endsWith(".ebay.com"))
       );
-    }, "Expected HTTPS eBay or Facebook Marketplace URL"),
+    }, "Expected HTTPS eBay URL"),
     title: z.string().min(1).max(500),
     description: z.string().max(20000),
     specifics: z.array(Attribute),
@@ -162,33 +119,8 @@ export const Listing = z
     endTime: z.iso.datetime().nullable(),
     listedAt: z.iso.datetime().nullable().optional(),
     raw: z.unknown(),
-    provenance: z
-      .object({
-        provider: z.string().min(1),
-        accessMode: z.enum(["authorized_api", "licensed_provider"]),
-        externalId: text,
-        retrievedAt: z.iso.datetime(),
-        schemaVersion: z.literal("1"),
-        evidenceHash: z.string().regex(/^[a-f0-9]{64}$/),
-        locationLabel: text.nullable(),
-        deliveryModes: z.array(z.enum(["pickup", "shipping"])).min(1),
-        travelCost: money,
-        status: z.enum(["active", "pending", "sold", "removed", "unknown"]),
-      })
-      .strict()
-      .optional(),
   })
-  .strict()
-  .refine(
-    (l) =>
-      l.source === "ebay"
-        ? new URL(l.url).hostname === "ebay.com" ||
-          new URL(l.url).hostname.endsWith(".ebay.com")
-        : !!l.provenance &&
-          l.id.startsWith("facebook_marketplace:") &&
-          new URL(l.url).hostname.endsWith("facebook.com"),
-    "Source identity mismatch",
-  );
+  .strict();
 export type Listing = z.infer<typeof Listing>;
 export const attributes = (item: {
   attributes: { key: string; value: string }[];

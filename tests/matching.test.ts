@@ -1,8 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { evaluateMatch } from "../src/filters/evaluate.js";
-import { basicReject } from "../src/filters/matches.js";
-import { marketplaceListing } from "../src/connectors/brightdata.js";
 import { listing, normalized, watch } from "../src/fixtures.js";
 import type { WatchConfig } from "../src/config/schema.js";
 
@@ -27,7 +25,6 @@ test("cheap filters reject on price range, exclusions, condition, format and sel
     [{ sellerPercent: 90 }, { minSellerPercent: 98 }, /seller rating/],
     [{ sellerPercent: null }, { minSellerPercent: 98 }, /seller rating/],
     [{ country: "CA" }, {}, /location/],
-    [{}, { sources: ["facebook_marketplace"] }, /Source not enabled/],
   ];
   for (const [l, w, reason] of cases) {
     const result = match({ ...listing, ...l }, normalized, { ...watch, ...w });
@@ -117,33 +114,4 @@ test("extraction decides relevance and attribute criteria", () => {
     ).matched,
     true,
   );
-});
-
-test("Marketplace listings match without sold evidence and carry risk-phrase warnings", async () => {
-  const fb = await marketplaceListing({
-    url: "https://www.facebook.com/marketplace/item/42/",
-    title: "Acme wireless gaming mouse",
-    description: "Deposit required to hold. Stock photo.",
-    price: 40,
-    locationLabel: "Portland, OR",
-  });
-  const w: WatchConfig = {
-    ...watch,
-    sources: ["ebay", "facebook_marketplace"],
-    location: { label: "Portland, OR", postalCode: null, radiusMiles: 25 },
-    deliveryModes: ["pickup"],
-    minSellerPercent: 99,
-  };
-  // Unknown provider condition defers to extraction; eBay-only seller rules do not apply.
-  assert.equal(basicReject(fb, w), null);
-  const result = match(fb, normalized, w);
-  assert.equal(result.matched, true);
-  assert.ok(result.warnings.includes("Requires verification: deposit"));
-  assert.ok(result.warnings.includes("Requires verification: stock photo"));
-  assert.match(result.warnings.join(), /in person/);
-  assert.equal(
-    match(fb, { ...normalized, condition: "for_parts" }, w).matched,
-    false,
-  );
-  assert.deepEqual(match().warnings, []);
 });

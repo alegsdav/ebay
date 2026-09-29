@@ -12,7 +12,6 @@ import { cloudConfig } from "../src/cloud/config.js";
 import { canPost, alertMessage } from "../src/cloud/discord.js";
 import type { CloudStore } from "../src/cloud/store.js";
 import { watch, samplePayload, normalized } from "../src/fixtures.js";
-import type { WatchConfig } from "../src/config/schema.js";
 const config = () =>
   cloudConfig({
     SUPABASE_URL: "https://test.supabase.co",
@@ -149,14 +148,6 @@ test("cloud alert is a single-tier match with no pricing analysis", () => {
     /profit|resale|comparable|discount|all-in|max(imum)? bid|score/i,
   );
 });
-const area = { label: "Portland, OR", postalCode: null, radiusMiles: 25 };
-const both: WatchConfig = {
-  ...watch,
-  sources: ["ebay", "facebook_marketplace"],
-  location: area,
-  deliveryModes: ["pickup"],
-  intervalMinutes: 1440,
-};
 const worker = () =>
   cloudConfig({
     SUPABASE_URL: "https://test.supabase.co",
@@ -221,7 +212,7 @@ function services(t: any, extract = normalized) {
 function fakeDb() {
   const log = { enqueued: [] as any[], processed: [] as any[], alerts: 0 };
   const db = {
-    watch: async () => ({ id: "w", active: true, revision: 1, config: both }),
+    watch: async () => ({ id: "w", active: true, revision: 1, config: watch }),
     budget: async () => {},
     cooldown: async () => {},
     rows: async () => [],
@@ -240,26 +231,48 @@ function fakeDb() {
   } as unknown as CloudStore;
   return { db, log };
 }
-test("both-source scans run the eBay leg and skip disabled Marketplace without a provider call", async (t) => {
-  const { calls } = services(t);
+const scanJob = {
+  id: "job",
+  kind: "scan" as const,
+  payload: { watchId: "w", revision: 1 },
+  lease_token: "l",
+  attempts: 1,
+};
+test("scans queue new eBay candidates only and explain themselves in the debug channel", async (t) => {
+  const { calls, sent } = services(t);
   const { db, log } = fakeDb();
-  await processJob(
-    {
-      id: "job",
-      kind: "scan",
-      payload: { watchId: "w", revision: 1 },
-      lease_token: "l",
-      attempts: 1,
-    },
-    worker(),
-    db,
-    AbortSignal.timeout(5000),
-  );
+  const c = worker();
+  c.env.DEBUG_CHANNEL_ID = "1554167190230536292";
+  await processJob(scanJob, c, db, AbortSignal.timeout(5000));
   assert.deepEqual(
     log.enqueued.map((j) => j.payload.listing.id),
     ["1"],
   );
-  assert.ok(calls.every((u) => u.includes("ebay.com")));
+  assert.ok(calls.every((u) => /ebay\.com|discord\.com/.test(u)));
+  assert.match(
+    sent[0].content,
+    /eBay search "wireless gaming mouse": 2 results · 1 passed filters · 1 new to check/,
+  );
+  // A listing this watch already processed is not checked (or alerted) again.
+  t.mock.restoreAll();
+  services(t);
+  const again = fakeDb();
+  (again.db as any).rows = async (table: string, params: any) =>
+    table === "scout_processing" && params.listing_id
+      ? [{ listing_id: "1" }]
+      : [];
+  await processJob(scanJob, worker(), again.db, AbortSignal.timeout(5000));
+  assert.equal(again.log.enqueued.length, 0);
+});
+test("without eBay credentials scans do nothing and call no service", async (t) => {
+  t.mock.method(globalThis, "fetch", () => {
+    throw new Error("No network permitted");
+  });
+  const { db, log } = fakeDb();
+  const c = worker();
+  c.env.EBAY_CLIENT_ID = "";
+  await processJob(scanJob, c, db, AbortSignal.timeout(5000));
+  assert.equal(log.enqueued.length, 0);
 });
 test("listing jobs alert matches once to the watch channel and keep non-matches silent", async (t) => {
   const job = {
@@ -298,6 +311,31 @@ test("listing jobs alert matches once to the watch channel and keep non-matches 
   ]);
   assert.equal(b.log.alerts, 0);
   assert.equal(unrelated.sent.length, 0);
+});
+test("queued listings are still evaluated after the watch is edited", async (t) => {
+  const matched = services(t);
+  const a = fakeDb();
+  await processJob(
+    {
+      id: "job",
+      kind: "listing",
+      payload: {
+        watchId: "w",
+        revision: 0,
+        listing: { ...samplePayload().listing, id: "1" },
+      },
+      lease_token: "l",
+      attempts: 1,
+    },
+    worker(),
+    a.db,
+    AbortSignal.timeout(5000),
+  );
+  assert.deepEqual(
+    a.log.processed.map((p) => p.status),
+    ["matched"],
+  );
+  assert.equal(matched.sent.length, 1);
 });
 test("real PostgreSQL migration, atomic confirmations, budgets, queue leases and service-only grants", async () => {
   const db = new PGlite();
@@ -402,366 +440,4 @@ test("real PostgreSQL migration, atomic confirmations, budgets, queue leases and
   } finally {
     await db.close();
   }
-});
-const marketplaceWorker = (extra: Record<string, string> = {}) =>
-  cloudConfig({
-    SUPABASE_URL: "https://test.supabase.co",
-    SUPABASE_SERVICE_ROLE_KEY: "x".repeat(40),
-    DISCORD_PUBLIC_KEY: "a".repeat(64),
-    WORKER_SECRET: "w".repeat(64),
-    DISCORD_TOKEN: "fake-token",
-    DISCORD_APPLICATION_ID: "123",
-    DISCORD_GUILD_ID: "456",
-    CLOUD_MONITORING_ENABLED: "true",
-    DRY_RUN: "true",
-    FACEBOOK_MONITORING_ENABLED: "true",
-    BRIGHT_DATA_API_KEY: "fake-bd-key",
-    GEMINI_API_KEY: "fake-key",
-    ...extra,
-  });
-const fbRecord = (
-  id: string,
-  listed: string,
-  title = "Wireless gaming mouse",
-) => ({
-  url: `https://www.facebook.com/marketplace/item/${id}`,
-  title,
-  final_price: 40,
-  currency: "USD",
-  product_id: id,
-  condition: "Used - Good",
-  description: "Works great",
-  location: "Beaverton, OR",
-  country_code: null,
-  profile_id: "999",
-  listing_date: listed,
-  is_sold: false,
-});
-// A small stateful stand-in for the Supabase tables the Marketplace flow touches.
-function marketplaceDb(budgetLimit = Infinity) {
-  const state = {
-    runs: [] as any[],
-    jobs: [] as any[],
-    processed: new Map<string, string>(),
-    used: 0,
-  };
-  const db = {
-    watch: async () => ({ id: "w", active: true, revision: 1, config: both }),
-    budget: async () => {},
-    cooldown: async () => {},
-    monthlyBudget: async (_s: string, amount: number) => {
-      if (amount > 0 && state.used + amount > budgetLimit) return false;
-      state.used += amount;
-      return true;
-    },
-    rows: async (table: string, params: Record<string, string>) =>
-      table === "scout_ingestion_runs"
-        ? state.runs.filter(
-            (r) =>
-              params.query_key === `eq.${r.query_key}` &&
-              ["running", "succeeded"].includes(r.status),
-          )
-        : [],
-    insert: async (table: string, row: any) => {
-      assert.equal(table, "scout_ingestion_runs");
-      const saved = { id: `run${state.runs.length}`, ...row };
-      state.runs.push(saved);
-      return [saved];
-    },
-    update: async (table: string, params: any, fields: any) => {
-      if (table === "scout_ingestion_runs")
-        Object.assign(
-          state.runs.find((r) => `eq.${r.id}` === params.id),
-          fields,
-        );
-      return [];
-    },
-    enqueue: async (rows: any[]) => state.jobs.push(...rows),
-    seen: async (_w: string, ids: string[]) =>
-      new Set(ids.filter((id) => state.processed.has(id))),
-    saveListing: async () => {},
-    process: async (_w: string, l: string, status: string) =>
-      state.processed.set(l, status),
-  } as unknown as CloudStore;
-  return { db, state };
-}
-function brightData(t: any, snapshots: Record<string, any[]>) {
-  const triggers: any[] = [];
-  let progress = "running";
-  t.mock.method(globalThis, "fetch", async (url: any, init: any) => {
-    const u = new URL(String(url));
-    if (u.hostname !== "api.brightdata.com")
-      throw new Error(`Unexpected request: ${u}`);
-    if (u.pathname === "/datasets/v3/trigger") {
-      triggers.push({
-        limit: u.searchParams.get("limit_per_input"),
-        input: JSON.parse(init.body).input[0],
-      });
-      return Response.json({ snapshot_id: `sd_${triggers.length}` });
-    }
-    if (u.pathname.startsWith("/datasets/v3/progress/"))
-      return Response.json({ status: progress });
-    const id = u.pathname.split("/").pop()!;
-    return Response.json(snapshots[id] ?? []);
-  });
-  return {
-    triggers,
-    ready: () => {
-      progress = "ready";
-    },
-  };
-}
-const job = (kind: any, payload: any, id = "job") => ({
-  id,
-  kind,
-  payload: { watchId: "w", revision: 1, ...payload },
-  lease_token: "l",
-  attempts: 1,
-});
-test("Marketplace polling: first search shows current listings, later hourly polls stay small and skip repeats", async (t) => {
-  const bd = brightData(t, {
-    sd_1: [
-      fbRecord("1", "2026-09-10T00:00:00.000Z"),
-      fbRecord("2", "2026-09-27T00:00:00.000Z"),
-      fbRecord("3", "2026-09-27T12:00:00.000Z", "Mouse, broken wheel"),
-    ],
-    sd_2: [
-      fbRecord("2", "2026-09-27T00:00:00.000Z"),
-      fbRecord("4", "2026-09-28T09:00:00.000Z"),
-    ],
-  });
-  const { db, state } = marketplaceDb();
-  const c = marketplaceWorker();
-  const signal = AbortSignal.timeout(5000);
-  // eBay has no credentials yet: its leg is skipped, not a failure.
-  await processJob(job("scan", {}), c, db, signal);
-  assert.deepEqual(bd.triggers, [
-    {
-      limit: "10",
-      input: {
-        keyword: "wireless gaming mouse",
-        city: "Portland, Oregon",
-        radius: 25,
-        date_listed: "",
-      },
-    },
-  ]);
-  assert.equal(state.used, 10);
-  const [first] = state.jobs.splice(0);
-  assert.equal(first.kind, "snapshot");
-  assert.ok(Date.parse(first.available_at) > Date.now());
-  // Still running: re-check later without re-triggering (no new charge).
-  await processJob(job("snapshot", first.payload), c, db, signal);
-  const [again] = state.jobs.splice(0);
-  assert.equal(again.dedupe_key, "snapshot:sd_1:1");
-  assert.equal(bd.triggers.length, 1);
-  bd.ready();
-  await processJob(job("snapshot", again.payload), c, db, signal);
-  // 3 records returned: 7 unused reserved records are refunded.
-  assert.equal(state.used, 3);
-  assert.equal(
-    state.processed.get("facebook_marketplace:brightdata:3"),
-    "filtered",
-  );
-  // Newest first; older listings are kept on the first search.
-  assert.deepEqual(
-    state.jobs.splice(0).map((j) => j.payload.listing.id),
-    ["facebook_marketplace:brightdata:2", "facebook_marketplace:brightdata:1"],
-  );
-  assert.equal(state.runs[0].status, "succeeded");
-  assert.equal(state.runs[0].records_received, 3);
-  state.processed.set("facebook_marketplace:brightdata:2", "matched");
-  state.processed.set("facebook_marketplace:brightdata:1", "rejected");
-  // Next hourly poll: 2 recent records; the already-seen one is not re-processed.
-  await processJob(job("scan", {}, "job2"), c, db, signal);
-  assert.deepEqual(bd.triggers[1], {
-    limit: "2",
-    input: {
-      keyword: "wireless gaming mouse",
-      city: "Portland, Oregon",
-      radius: 25,
-      date_listed: "Last 24 hours",
-    },
-  });
-  const [second] = state.jobs.splice(0);
-  await processJob(job("snapshot", second.payload), c, db, signal);
-  assert.deepEqual(
-    state.jobs.map((j) => j.payload.listing.id),
-    ["facebook_marketplace:brightdata:4"],
-  );
-  assert.equal(state.used, 5);
-});
-test("Marketplace polls stop at the monthly record budget without calling Bright Data", async (t) => {
-  const bd = brightData(t, {});
-  const { db, state } = marketplaceDb(9);
-  await processJob(
-    job("scan", {}),
-    marketplaceWorker(),
-    db,
-    AbortSignal.timeout(5000),
-  );
-  assert.equal(bd.triggers.length, 0);
-  assert.equal(state.jobs.length, 0);
-  assert.equal(state.used, 0);
-});
-test("a failed Marketplace trigger refunds its reserved records", async (t) => {
-  t.mock.method(
-    globalThis,
-    "fetch",
-    async () => new Response("", { status: 400 }),
-  );
-  const { db, state } = marketplaceDb();
-  await assert.rejects(
-    processJob(
-      job("scan", {}),
-      marketplaceWorker(),
-      db,
-      AbortSignal.timeout(5000),
-    ),
-  );
-  assert.equal(state.used, 0);
-  assert.equal(state.runs.length, 0);
-});
-test("Marketplace city names are normalized so Facebook recognizes them", async () => {
-  const { marketplaceCity, stateOf } =
-    await import("../src/config/preferences.js");
-  const at = (label: string, city: string | null = null) =>
-    marketplaceCity({ label, postalCode: null, radiusMiles: 5, city });
-  assert.equal(at("campbell, ca"), "Campbell, CA");
-  assert.equal(at("SAN JOSE, ca"), "San Jose, CA");
-  assert.equal(at("97201", "portland, or"), "Portland, OR");
-  assert.equal(at("97201"), null);
-  assert.equal(stateOf("Beaverton, OR"), "OR");
-  assert.equal(stateOf("Portland"), null);
-});
-test("a batch entirely outside the watch's state is treated as an unrecognized city", async (t) => {
-  const bd = brightData(t, {
-    sd_1: [
-      { ...fbRecord("7", "2026-09-27T00:00:00.000Z"), location: "Norfolk, VA" },
-      {
-        ...fbRecord("8", "2026-09-26T00:00:00.000Z"),
-        location: "Portsmouth, VA",
-      },
-    ],
-  });
-  bd.ready();
-  const { db, state } = marketplaceDb();
-  const c = marketplaceWorker();
-  const signal = AbortSignal.timeout(5000);
-  await processJob(job("scan", {}), c, db, signal);
-  assert.equal(bd.triggers[0].input.city, "Portland, Oregon");
-  const [snap] = state.jobs.splice(0);
-  await processJob(job("snapshot", snap.payload), c, db, signal);
-  assert.equal(state.jobs.length, 0);
-  assert.equal(
-    state.processed.get("facebook_marketplace:brightdata:7"),
-    "filtered",
-  );
-  // A batch with at least one in-state listing is trusted (cross-border metros).
-  const bd2 = brightData(t, {
-    sd_1: [
-      {
-        ...fbRecord("9", "2026-09-27T00:00:00.000Z"),
-        location: "Vancouver, WA",
-      },
-      fbRecord("10", "2026-09-26T00:00:00.000Z"),
-    ],
-  });
-  bd2.ready();
-  const fresh = marketplaceDb();
-  await processJob(job("scan", {}), c, fresh.db, signal);
-  const [snap2] = fresh.state.jobs.splice(0);
-  await processJob(job("snapshot", snap2.payload), c, fresh.db, signal);
-  assert.equal(fresh.state.jobs.length, 2);
-});
-test("queued listings are still evaluated after the watch is edited", async (t) => {
-  const matched = services(t);
-  const a = fakeDb();
-  await processJob(
-    {
-      id: "job",
-      kind: "listing",
-      payload: {
-        watchId: "w",
-        revision: 0,
-        listing: { ...samplePayload().listing, id: "1" },
-      },
-      lease_token: "l",
-      attempts: 1,
-    },
-    worker(),
-    a.db,
-    AbortSignal.timeout(5000),
-  );
-  assert.deepEqual(
-    a.log.processed.map((p) => p.status),
-    ["matched"],
-  );
-  assert.equal(matched.sent.length, 1);
-});
-test("Bright Data receives full state names; unknown or foreign regions pass through", async () => {
-  const { providerCity } = await import("../src/connectors/brightdata.js");
-  const at = (label: string) =>
-    providerCity({ label, postalCode: null, radiusMiles: 5, city: null });
-  assert.equal(at("campbell, ca"), "Campbell, California");
-  assert.equal(at("Washington, DC"), "Washington, District of Columbia");
-  assert.equal(at("Springfield"), "Springfield");
-  assert.equal(at("97201"), null);
-});
-test("small radii are widened for Bright Data and the debug channel explains each step", async (t) => {
-  const posts: { channel: string; content: string }[] = [];
-  const triggers: any[] = [];
-  t.mock.method(globalThis, "fetch", async (url: any, init: any) => {
-    const u = new URL(String(url));
-    if (u.hostname === "discord.com") {
-      posts.push({
-        channel: u.pathname.split("/")[4]!,
-        content: JSON.parse(init.body).content,
-      });
-      return Response.json({ id: "m" });
-    }
-    if (u.pathname === "/datasets/v3/trigger") {
-      triggers.push(JSON.parse(init.body).input[0]);
-      return Response.json({ snapshot_id: "sd_1" });
-    }
-    if (u.pathname.startsWith("/datasets/v3/progress/"))
-      return Response.json({ status: "ready" });
-    if (u.pathname.startsWith("/datasets/v3/snapshot/"))
-      return Response.json([
-        fbRecord("1", "2026-09-27T00:00:00.000Z"),
-        fbRecord("2", "2026-09-26T00:00:00.000Z", "Mouse, broken wheel"),
-      ]);
-    throw new Error(`Unexpected ${u}`);
-  });
-  const { db, state } = marketplaceDb();
-  (db as any).watch = async () => ({
-    id: "w",
-    active: true,
-    revision: 1,
-    config: { ...both, location: { ...area, radiusMiles: 5 } },
-  });
-  const c = marketplaceWorker({ DEBUG_CHANNEL_ID: "1554167190230536292" });
-  const signal = AbortSignal.timeout(5000);
-  await processJob(job("scan", {}), c, db, signal);
-  assert.equal(triggers[0].radius, 20);
-  const [snap] = state.jobs.splice(0);
-  await processJob(job("snapshot", snap.payload), c, db, signal);
-  assert.ok(posts.every((p) => p.channel === "1554167190230536292"));
-  assert.match(posts[0]!.content, /first search.*near Portland, Oregon, 20 mi/);
-  assert.match(posts[1]!.content, /returned 2 records/);
-  assert.match(
-    posts[1]!.content,
-    /checking with Gemini: \[Wireless gaming mouse\]/,
-  );
-  assert.match(posts[1]!.content, /filtered \(Excluded keyword\)/);
-  // Without a debug channel nothing extra is posted.
-  posts.length = 0;
-  const quiet = marketplaceDb();
-  await processJob(
-    job("scan", {}, "j2"),
-    marketplaceWorker(),
-    quiet.db,
-    signal,
-  );
-  assert.equal(posts.length, 0);
 });

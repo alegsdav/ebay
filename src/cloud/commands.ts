@@ -1,13 +1,5 @@
 import { WatchConfig } from "../config/schema.js";
-import {
-  prepareWatch,
-  describeDefaults,
-  updateDefaults,
-  sourceChoices,
-  sourceLabel,
-  marketplaceMinInterval,
-  type SourceChoice,
-} from "../config/preferences.js";
+import { prepareWatch } from "../config/watch.js";
 import { type Interpreter } from "../llm/client.js";
 import { CloudStore, type CloudWatch } from "./store.js";
 import {
@@ -53,23 +45,12 @@ export class CloudCommands {
     channel: string,
     watch?: CloudWatch,
     base?: WatchConfig,
-    sources?: string,
   ) {
     if (!query || query.length > 2000)
       throw new Error("Use a query of 1–2000 characters.");
-    if (sources !== undefined && !Object.hasOwn(sourceChoices, sources))
-      throw new Error("Unsupported sources option.");
     const previous = base ?? watch?.config;
-    const defaults = await this.db.defaults(actor(i), i.guild_id!);
-    const parsed = await this.llm.parseWatch(query, defaults);
-    const prepared = prepareWatch(
-      parsed,
-      query,
-      channel,
-      defaults,
-      previous,
-      sources as SourceChoice | undefined,
-    );
+    const parsed = await this.llm.parseWatch(query);
+    const prepared = prepareWatch(parsed, query, channel, previous);
     const config = prepared.config;
     if (config.buying !== "fixed" && !this.config.env.EBAY_ALLOW_AUCTIONS)
       throw new Error(
@@ -84,16 +65,11 @@ export class CloudCommands {
       i.id,
       watch,
     );
-    return preview(
-      d.config,
-      d.id,
-      [
-        ...prepared.notes,
-        ...parsed.assumptions,
-        ...parsed.clarifications.map((q) => `Unresolved: ${q}`),
-      ],
-      this.config.env.FACEBOOK_MONITORING_ENABLED,
-    );
+    return preview(d.config, d.id, [
+      ...prepared.notes,
+      ...parsed.assumptions,
+      ...parsed.clarifications.map((q) => `Unresolved: ${q}`),
+    ]);
   }
   async run(i: Interaction): Promise<Message> {
     authorized(i, this.config);
@@ -118,20 +94,12 @@ export class CloudCommands {
           p_owner: user,
           p_guild: guild,
         });
-        const facebookPending =
-          d.config.sources.includes("facebook_marketplace") &&
-          !this.config.env.FACEBOOK_MONITORING_ENABLED;
         return {
           content: [
-            `Watch saved: \`${watchId}\`. Sources: ${d.config.sources.map(sourceLabel).join(" + ")}.`,
+            `Watch saved: \`${watchId}\`.`,
             this.config.CLOUD_MONITORING_ENABLED
               ? "Scheduled monitoring is enabled."
               : "Monitoring is OFF until you enable CLOUD_MONITORING_ENABLED.",
-            ...(facebookPending
-              ? [
-                  "Facebook Marketplace searching is turned off right now; that leg is skipped until it is enabled.",
-                ]
-              : []),
             ...(this.config.env.DRY_RUN
               ? ["Dry-run is ON; match posts are suppressed."]
               : []),
@@ -171,29 +139,9 @@ export class CloudCommands {
     const opts = options(i),
       sub = subcommand(i),
       command = i.data.name;
-    if (command === "defaults") {
-      const previous = await this.db.defaults(user, guild);
-      if (!Object.keys(opts).length)
-        return { content: describeDefaults(previous) };
-      const value = updateDefaults(previous, opts);
-      // Marketplace searches by city; look up the city for a ZIP once, at save time.
-      if (value.location.postalCode && !value.location.city)
-        value.location.city = await this.llm
-          .resolveCity?.(value.location.postalCode)
-          .catch(() => null);
-      await this.db.saveDefaults(user, guild, value);
-      return { content: `Saved. ${describeDefaults(value)}` };
-    }
     if (command === "watch") {
       if (sub === "create")
-        return this.parse(
-          i,
-          opts.query,
-          opts.channel ?? i.channel_id,
-          undefined,
-          undefined,
-          opts.sources,
-        );
+        return this.parse(i, opts.query, opts.channel ?? i.channel_id);
       if (sub === "list") {
         const rows = await this.db.rows("scout_watches", {
           owner_id: `eq.${user}`,
@@ -206,7 +154,7 @@ export class CloudCommands {
             ? rows
                 .map(
                   (w) =>
-                    `${w.active ? "Active" : "Paused"} · ${w.config.name} · ${(w.config.sources ?? []).map(sourceLabel).join(" + ")} · \`${w.id}\``,
+                    `${w.active ? "Active" : "Paused"} · ${w.config.name} · \`${w.id}\``,
                 )
                 .join("\n")
                 .slice(0, 1900)
@@ -218,14 +166,7 @@ export class CloudCommands {
       }
       const w = await this.owned(opts.id, i);
       if (sub === "update")
-        return this.parse(
-          i,
-          opts.query,
-          w.config.channelId,
-          w,
-          undefined,
-          opts.sources,
-        );
+        return this.parse(i, opts.query, w.config.channelId, w);
       if (sub === "delete") {
         await this.db.remove("scout_watches", {
           id: `eq.${w.id}`,
@@ -259,13 +200,6 @@ export class CloudCommands {
       )
         throw new Error("Minimum price exceeds maximum price.");
       if (opts.frequency !== undefined) config.intervalMinutes = opts.frequency;
-      if (
-        config.sources.includes("facebook_marketplace") &&
-        config.intervalMinutes < marketplaceMinInterval
-      )
-        throw new Error(
-          "Watches that include Facebook Marketplace run at most hourly (60 minutes).",
-        );
       config.channelId = opts.channel ?? config.channelId;
       await this.discord.channelAllowed(config.channelId, guild, user);
       const d = await this.db.createDraft(
@@ -276,12 +210,7 @@ export class CloudCommands {
         i.id,
         w,
       );
-      return preview(
-        d.config,
-        d.id,
-        [],
-        this.config.env.FACEBOOK_MONITORING_ENABLED,
-      );
+      return preview(d.config, d.id);
     }
     if (command === "listing") {
       if (sub === "saved") {
@@ -330,7 +259,7 @@ export class CloudCommands {
         limit: "1000",
       });
       return {
-        content: `${watches.length} watches · ${watches.filter((w) => w.active).length} active. Dry-run: ${this.config.env.DRY_RUN}. Monitoring: ${this.config.CLOUD_MONITORING_ENABLED}. Facebook Marketplace: ${this.config.env.FACEBOOK_MONITORING_ENABLED ? "enabled" : "disabled"}. Watches that include Marketplace: at most 5 active; up to ${this.config.env.BRIGHT_DATA_MAX_RECORDS_PER_MONTH} Bright Data records per month.`,
+        content: `${watches.length} watches · ${watches.filter((w) => w.active).length} active. Dry-run: ${this.config.env.DRY_RUN}. Monitoring: ${this.config.CLOUD_MONITORING_ENABLED}. eBay: ${this.config.env.EBAY_CLIENT_ID ? this.config.env.EBAY_ENV : "not configured"}.`,
       };
     }
     if (command === "alert")

@@ -164,14 +164,12 @@ test("Discord payload and slash definitions serialize within platform limits", (
   assert.equal(result.components![0].components.length, 5);
   assert.ok(commands.some((c) => c.name === "watch"));
   const watch: any = commands.find((c) => c.name === "watch");
-  for (const sub of ["create", "update"])
-    assert.deepEqual(
-      watch.options
-        .find((o: any) => o.name === sub)
-        .options.find((o: any) => o.name === "sources")
-        .choices.map((c: any) => c.value),
-      ["both", "ebay_only", "facebook_only"],
-    );
+  assert.deepEqual(
+    watch.options
+      .find((o: any) => o.name === "create")
+      .options.map((o: any) => o.name),
+    ["query", "channel"],
+  );
   const listing: any = commands.find((c) => c.name === "listing");
   assert.ok(!listing.options.some((o: any) => o.name === "evaluate"));
   const settings: any = commands.find((c) => c.name === "settings");

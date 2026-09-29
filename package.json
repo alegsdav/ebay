@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Read-only Discord keyword watches across eBay and Facebook Marketplace",
+  "description": "Read-only Discord keyword watches for eBay listings",
   "engines": {
     "node": ">=24.0.0"
   },
@@ -17,7 +17,8 @@
     "format": "prettier --write src tests scripts docs README.md package.json tsconfig.json .github/workflows/ci.yml",
     "format:check": "prettier --check src tests scripts docs README.md package.json tsconfig.json .github/workflows/ci.yml",
     "build:cloud": "node scripts/build-cloud.mjs",
-    "check:model": "node --import tsx --env-file-if-exists=.env scripts/cloud-admin.ts model"
+    "check:model": "node --import tsx --env-file-if-exists=.env scripts/cloud-admin.ts model",
+    "check:ebay": "node --import tsx --env-file-if-exists=.env.supabase scripts/cloud-admin.ts ebay"
   },
   "dependencies": {
     "discord.js": "^14.21.0",

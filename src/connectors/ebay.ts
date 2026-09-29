@@ -2,7 +2,7 @@ import { Listing, type WatchConfig } from "../config/schema.js";
 import { type Env, requireValues } from "../config/env.js";
 import { HttpError, requestJson } from "./http.js";
 import { log } from "../logging.js";
-import { assertSourceAccess, type ListingSourceConnector } from "./source.js";
+import type { ListingSource } from "./source.js";
 export type { ListingSource } from "./source.js";
 export function mapCondition(id: unknown): Listing["condition"] {
   const n = Number(id);
@@ -13,6 +13,10 @@ export function mapCondition(id: unknown): Listing["condition"] {
   if (n === 7000) return "for_parts";
   return "unknown";
 }
+const isoDate = (value: unknown) => {
+  const t = typeof value === "string" ? Date.parse(value) : NaN;
+  return Number.isFinite(t) ? new Date(t).toISOString() : null;
+};
 export function mapItem(item: any): Listing {
   if (
     item.estimatedAvailabilities?.some((a: any) =>
@@ -67,6 +71,7 @@ export function mapItem(item: any): Listing {
     country: item.itemLocation?.country ?? null,
     auction,
     endTime: item.itemEndDate ?? null,
+    listedAt: isoDate(item.itemCreationDate),
     // Store useful source evidence, excluding response metadata, account/payment fields and exact locations.
     raw: {
       itemId: item.itemId,
@@ -81,22 +86,7 @@ export function mapItem(item: any): Listing {
     },
   });
 }
-export class EbaySource implements ListingSourceConnector {
-  readonly source = "ebay";
-  readonly provider = "ebay";
-  readonly accessMode = "authorized_api";
-  capabilities() {
-    return {
-      scheduledSearch: true,
-      locations: false,
-      deliveryModes: ["shipping"] as const,
-    };
-  }
-  validateWatch(watch: WatchConfig) {
-    assertSourceAccess(this.source, this.provider, this.accessMode, true);
-    if (!watch.sources.includes(this.source))
-      throw new Error("Watch does not include eBay.");
-  }
+export class EbaySource implements ListingSource {
   private token = "";
   private expires = 0;
   private base: string;
@@ -165,7 +155,6 @@ export class EbaySource implements ListingSourceConnector {
     }
   }
   async *search(watch: WatchConfig) {
-    this.validateWatch(watch);
     if (watch.buying !== "fixed" && !this.env.EBAY_ALLOW_AUCTIONS)
       throw new Error(
         "Auction access is disabled; update watch to fixed or enable approved auction access.",
@@ -202,7 +191,6 @@ export class EbaySource implements ListingSourceConnector {
       if (!response.next) break;
       if (page === this.env.MAX_PAGES_PER_WATCH - 1)
         log("search_truncated", {
-          source: this.source,
           pages: this.env.MAX_PAGES_PER_WATCH,
         });
     }

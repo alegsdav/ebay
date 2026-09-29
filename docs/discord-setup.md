@@ -80,18 +80,14 @@ This registers the application commands **for your configured server**. It repla
    /watch create query: wireless gaming mice under $80, new or open box
    ```
 
-   The watch searches eBay and Facebook Marketplace by default. Add `sources:eBay only` or `sources:Facebook Marketplace only` to opt out of one. Marketplace needs `/defaults` (city or ZIP, radius, delivery) first.
-
-4. The bot acknowledges the command promptly, then processes it through the queue. It returns a preview (keywords, sources, price range, filters, channel) and `watch-preview.json` with the complete rules.
+4. The bot acknowledges the command promptly, then processes it through the queue. It returns a preview (keywords, price range, filters, channel) and `watch-preview.json` with the complete rules.
 5. Read the preview. **Edit query** opens a modal for a complete replacement request. **Cancel** discards it. **Confirm watch** saves it. Preview buttons expire after 15 minutes and work only for their creator.
 6. Use `/watch list` to copy the saved watch ID. `/settings id:… max_price:… frequency:… channel:…` previews price-range, frequency or channel changes; confirm that preview too.
-7. `/watch pause`, `/watch resume`, `/watch update` and `/watch delete` manage it. `/watch update` replaces the keywords and filters; sources, search area and price limits carry over unless the new query states them. `/listing saved` retrieves saved alerts; `/listing details` accepts the alert ID from an alert footer.
+7. `/watch pause`, `/watch resume`, `/watch update` and `/watch delete` manage it. `/watch update` replaces the keywords and filters; price limits carry over unless the new query states them. `/listing saved` retrieves saved alerts; `/listing details` accepts the alert ID from an alert footer.
 
 ## 8. Enable actual monitoring
 
-Finish the [eBay setup](ebay-data-options.md) and install the Supabase Cron schedule. Set `CLOUD_MONITORING_ENABLED=true` while keeping `DRY_RUN=true`. Review function logs and `scout_processing` in the Supabase Table Editor. Then change `DRY_RUN=false` when ready for match posts. Keep `FACEBOOK_MONITORING_ENABLED=false` until the Bright Data connector is implemented; the eBay leg of every watch runs normally meanwhile.
-
-A listing that fails a filter, is judged not relevant, or lacks evidence for a required attribute is stored silently. A working `/alert test` verifies Discord presentation, not marketplace access or match quality.
+Finish the [eBay setup](ebay-data-options.md) and install the Supabase Cron schedule. Set `CLOUD_MONITORING_ENABLED=true` while keeping `DRY_RUN=true`. Review function logs and `scout_processing` in the Supabase Table Editor. Then change `DRY_RUN=false` when ready for match posts. A working `/alert test` verifies Discord presentation, not eBay access or match quality.
 
 ## Troubleshooting
 

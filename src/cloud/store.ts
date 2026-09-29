@@ -1,6 +1,5 @@
 import { Normalized, WatchConfig, type Listing } from "../config/schema.js";
 import { HttpError } from "../connectors/http.js";
-import { UserDefaults } from "../config/preferences.js";
 export interface CloudWatch {
   id: string;
   owner_id: string;
@@ -22,46 +21,12 @@ export interface CloudDraft {
 }
 export interface Job {
   id: string;
-  kind: "interaction" | "scan" | "listing" | "snapshot";
+  kind: "interaction" | "scan" | "listing";
   payload: any;
   lease_token: string;
   attempts: number;
 }
 export class CloudStore {
-  async defaults(owner: string, guild: string) {
-    const row = (
-      await this.rows("scout_user_defaults", {
-        owner_id: `eq.${owner}`,
-        guild_id: `eq.${guild}`,
-      })
-    )[0];
-    return row ? UserDefaults.parse(row.config) : null;
-  }
-  async saveDefaults(owner: string, guild: string, config: UserDefaults) {
-    await this.upsert(
-      "scout_user_defaults",
-      { owner_id: owner, guild_id: guild, config: UserDefaults.parse(config) },
-      "owner_id,guild_id",
-    );
-  }
-  sourceConfigs() {
-    return this.rows("scout_source_configs");
-  }
-  startIngestion(sourceConfigId: string, watchId: string) {
-    return this.insert("scout_ingestion_runs", {
-      source_config_id: sourceConfigId,
-      watch_id: watchId,
-      status: "running",
-    });
-  }
-  takeSourceBudget(configId: string, costUnits: number) {
-    if (!Number.isFinite(costUnits) || costUnits < 0)
-      throw new Error("Invalid provider cost");
-    return this.rpc("scout_take_source_budget", {
-      p_config: configId,
-      p_cost: costUnits,
-    });
-  }
   constructor(
     private url: string,
     private key: string,
@@ -85,8 +50,6 @@ export class CloudStore {
       if (response.status === 400) {
         const error = await response.json().catch(() => null);
         const safeMessages = [
-          "Maximum 5 active Marketplace watches. Pause or delete one first.",
-          "Marketplace watches require at least 60 minutes between searches.",
           "Watch changed; create a fresh preview",
           "Preview expired or unavailable",
         ];
@@ -213,24 +176,6 @@ export class CloudStore {
         service,
       );
     }
-  }
-  // Reserve (positive) or refund (negative) units against a calendar-month cap.
-  async monthlyBudget(service: string, amount: number, limit: number) {
-    return (await this.rpc("scout_take_monthly_budget", {
-      p_service: service,
-      p_amount: amount,
-      p_limit: limit,
-    })) as boolean;
-  }
-  // Listings this watch already processed, so repeats skip extraction and alerts.
-  async seen(watch: string, listings: string[]) {
-    if (!listings.length) return new Set<string>();
-    const rows = await this.rows("scout_processing", {
-      watch_id: `eq.${watch}`,
-      listing_id: `in.(${listings.map((id) => `"${id.replace(/["\\]/g, "")}"`).join(",")})`,
-      select: "listing_id",
-    });
-    return new Set(rows.map((r) => String(r.listing_id)));
   }
   async cooldown(service: string, until: number) {
     await this.upsert(
